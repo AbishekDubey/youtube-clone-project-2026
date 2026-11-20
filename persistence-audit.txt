@@ -1,0 +1,6323 @@
+﻿
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\channelStorage.ts
+==============================
+export type ChannelProfile = {
+  name: string;
+  username: string;
+  description: string;
+  avatar: string;
+  banner: string;
+};
+
+const DB_NAME = "youtube_channel_database";
+const STORE_NAME = "channel_profile";
+const DB_VERSION = 1;
+
+const DEFAULT_PROFILE: ChannelProfile = {
+  name: "Abishek Dubey",
+  username: "@abishekdubey",
+  description:
+    "Welcome to my channel. I share web development, React, Next.js, JavaScript, AI and technology content.",
+  avatar: "",
+  banner: "",
+};
+
+function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined") {
+      reject(
+        new Error("IndexedDB is only available in the browser.")
+      );
+      return;
+    }
+
+    const request = indexedDB.open(
+      DB_NAME,
+      DB_VERSION
+    );
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, {
+          keyPath: "id",
+        });
+      }
+    };
+
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+
+    request.onerror = () => {
+      reject(
+        request.error ||
+          new Error("Unable to open channel database.")
+      );
+    };
+  });
+}
+
+export async function getChannelProfile(): Promise<ChannelProfile> {
+  if (typeof window === "undefined") {
+    return DEFAULT_PROFILE;
+  }
+
+  try {
+    const db = await openDatabase();
+
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(
+        STORE_NAME,
+        "readonly"
+      );
+
+      const store =
+        transaction.objectStore(STORE_NAME);
+
+      const request = store.get("profile");
+
+      request.onsuccess = () => {
+        db.close();
+
+        if (!request.result) {
+          resolve(DEFAULT_PROFILE);
+          return;
+        }
+
+        resolve({
+          ...DEFAULT_PROFILE,
+          ...request.result.data,
+        });
+      };
+
+      request.onerror = () => {
+        db.close();
+
+        reject(
+          request.error ||
+            new Error(
+              "Unable to read channel profile."
+            )
+        );
+      };
+    });
+  } catch (error) {
+    console.error(
+      "Failed to load channel profile:",
+      error
+    );
+
+    return DEFAULT_PROFILE;
+  }
+}
+
+export async function saveChannelProfile(
+  profile: ChannelProfile
+): Promise<void> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store =
+      transaction.objectStore(STORE_NAME);
+
+    store.put({
+      id: "profile",
+      data: profile,
+    });
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+
+      reject(
+        transaction.error ||
+          new Error(
+            "Unable to save channel profile."
+          )
+      );
+    };
+  });
+}
+
+export async function resetChannelProfile(): Promise<void> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store =
+      transaction.objectStore(STORE_NAME);
+
+    store.delete("profile");
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+
+      reject(
+        transaction.error ||
+          new Error(
+            "Unable to reset channel profile."
+          )
+      );
+    };
+  });
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\commentStorage.ts
+==============================
+import { getCurrentUser } from "@/lib/auth";
+
+export type CommentReportReason =
+  | "spam"
+  | "harassment"
+  | "offensive";
+
+export type CommentUser = {
+  username: string;
+  displayName: string;
+  avatar: string;
+  location: string;
+  email?: string;
+};
+
+export type VideoComment = {
+  id: string;
+  videoId: number;
+  user: CommentUser;
+  text: string;
+  language: string;
+  createdAt: string;
+  updatedAt: string;
+  edited: boolean;
+  likes: number;
+  dislikes: number;
+
+  likedByCurrentUser: boolean;
+  dislikedByCurrentUser: boolean;
+
+  likedBy: string[];
+  dislikedBy: string[];
+
+  parentId: string | null;
+  replyCount: number;
+
+  reported: boolean;
+  reportReasons: CommentReportReason[];
+};
+
+export type CommentReport = {
+  id: string;
+  commentId: string;
+  reason: CommentReportReason;
+  reportedAt: string;
+  reportedBy: string;
+};
+
+export type ModerationRecord = {
+  id: string;
+  commentId: string;
+  action:
+    | "approved"
+    | "blocked"
+    | "reported"
+    | "deleted"
+    | "edited";
+  reason: string;
+  createdAt: string;
+};
+
+const COMMENT_KEY = "youtube_comments";
+const REPORT_KEY = "youtube_comment_reports";
+const MODERATION_KEY =
+  "youtube_comment_moderation";
+
+const EDIT_TIME_LIMIT =
+  15 * 60 * 1000;
+
+function getCurrentActorId() {
+  if (typeof window === "undefined") {
+    return "guest";
+  }
+
+  const user = getCurrentUser();
+
+  if (!user) {
+    return "guest";
+  }
+
+  return (
+    user.email ||
+    user.name ||
+    "guest"
+  ).toLowerCase();
+}
+
+function readStorage<T>(
+  key: string,
+  fallback: T
+): T {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+
+  try {
+    const data =
+      localStorage.getItem(key);
+
+    if (!data) {
+      return fallback;
+    }
+
+    const parsed = JSON.parse(data);
+
+    return parsed as T;
+  } catch (error) {
+    console.error(
+      `Failed to read ${key}:`,
+      error
+    );
+
+    return fallback;
+  }
+}
+
+function writeStorage<T>(
+  key: string,
+  value: T
+) {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify(value)
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      `Failed to save ${key}:`,
+      error
+    );
+
+    return false;
+  }
+}
+
+function normalizeComment(
+  comment: VideoComment
+): VideoComment {
+  const likedBy = Array.isArray(
+    comment.likedBy
+  )
+    ? comment.likedBy
+    : [];
+
+  const dislikedBy = Array.isArray(
+    comment.dislikedBy
+  )
+    ? comment.dislikedBy
+    : [];
+
+  const currentActor =
+    getCurrentActorId();
+
+  return {
+    ...comment,
+
+    user: {
+      username:
+        comment.user?.username ||
+        "user",
+      displayName:
+        comment.user?.displayName ||
+        "Guest User",
+      avatar:
+        comment.user?.avatar ||
+        "",
+      location:
+        comment.user?.location ||
+        "India",
+      email:
+        comment.user?.email ||
+        "",
+    },
+
+    text:
+      typeof comment.text ===
+      "string"
+        ? comment.text
+        : "",
+
+    language:
+      comment.language ||
+      "English",
+
+    createdAt:
+      comment.createdAt ||
+      new Date().toISOString(),
+
+    updatedAt:
+      comment.updatedAt ||
+      comment.createdAt ||
+      new Date().toISOString(),
+
+    edited:
+      Boolean(comment.edited),
+
+    likes:
+      typeof comment.likes ===
+      "number"
+        ? Math.max(
+            0,
+            comment.likes
+          )
+        : 0,
+
+    dislikes:
+      typeof comment.dislikes ===
+      "number"
+        ? Math.max(
+            0,
+            comment.dislikes
+          )
+        : 0,
+
+    likedByCurrentUser:
+      likedBy.includes(
+        currentActor
+      ),
+
+    dislikedByCurrentUser:
+      dislikedBy.includes(
+        currentActor
+      ),
+
+    likedBy,
+
+    dislikedBy,
+
+    parentId:
+      typeof comment.parentId ===
+      "string"
+        ? comment.parentId
+        : null,
+
+    replyCount:
+      typeof comment.replyCount ===
+      "number"
+        ? Math.max(
+            0,
+            comment.replyCount
+          )
+        : 0,
+
+    reported:
+      Boolean(comment.reported),
+
+    reportReasons:
+      Array.isArray(
+        comment.reportReasons
+      )
+        ? comment.reportReasons
+        : [],
+  };
+}
+
+function getStoredComments(): VideoComment[] {
+  const comments =
+    readStorage<
+      VideoComment[]
+    >(COMMENT_KEY, []);
+
+  return comments
+    .filter(Boolean)
+    .map(normalizeComment);
+}
+
+function saveAllComments(
+  comments: VideoComment[]
+) {
+  return writeStorage(
+    COMMENT_KEY,
+    comments
+  );
+}
+
+export function getAllComments(): VideoComment[] {
+  return getStoredComments();
+}
+
+export function getCommentById(
+  commentId: string
+): VideoComment | null {
+  const comment =
+    getStoredComments().find(
+      (item) =>
+        item.id === commentId
+    );
+
+  return comment || null;
+}
+
+export function getComments(
+  videoId: number
+): VideoComment[] {
+  return getStoredComments()
+    .filter(
+      (comment) =>
+        Number(comment.videoId) ===
+        Number(videoId)
+    )
+    .sort(
+      (a, b) =>
+        new Date(
+          b.createdAt
+        ).getTime() -
+        new Date(
+          a.createdAt
+        ).getTime()
+    );
+}
+
+export function getReplies(
+  commentId: string
+): VideoComment[] {
+  return getStoredComments()
+    .filter(
+      (comment) =>
+        comment.parentId ===
+        commentId
+    )
+    .sort(
+      (a, b) =>
+        new Date(
+          a.createdAt
+        ).getTime() -
+        new Date(
+          b.createdAt
+        ).getTime()
+    );
+}
+
+export function saveComment(
+  comment: VideoComment
+) {
+  const comments =
+    getStoredComments();
+
+  const existing =
+    comments.some(
+      (item) =>
+        item.id === comment.id
+    );
+
+  if (existing) {
+    return false;
+  }
+
+  const normalizedComment =
+    normalizeComment(comment);
+
+  saveAllComments([
+    normalizedComment,
+    ...comments,
+  ]);
+
+  /*
+   * Update parent's reply count.
+   */
+  if (
+    normalizedComment.parentId
+  ) {
+    updateReplyCount(
+      normalizedComment.parentId
+    );
+  }
+
+  return true;
+}
+
+export function updateReplyCount(
+  parentId: string
+) {
+  const comments =
+    getStoredComments();
+
+  const replyCount =
+    comments.filter(
+      (comment) =>
+        comment.parentId ===
+        parentId
+    ).length;
+
+  const updated =
+    comments.map(
+      (comment) =>
+        comment.id === parentId
+          ? {
+              ...comment,
+              replyCount,
+            }
+          : comment
+    );
+
+  saveAllComments(updated);
+}
+
+export function canEditComment(
+  comment: VideoComment,
+  actorId?: string
+) {
+  const currentActor =
+    (
+      actorId ||
+      getCurrentActorId()
+    ).toLowerCase();
+
+  const commentOwner =
+    (
+      comment.user.email ||
+      comment.user.username
+    ).toLowerCase();
+
+  const isOwner =
+    currentActor ===
+    commentOwner;
+
+  if (!isOwner) {
+    return false;
+  }
+
+  const createdAt =
+    new Date(
+      comment.createdAt
+    ).getTime();
+
+  const now = Date.now();
+
+  return (
+    now - createdAt <=
+    EDIT_TIME_LIMIT
+  );
+}
+
+export function getRemainingEditTime(
+  comment: VideoComment
+) {
+  const createdAt =
+    new Date(
+      comment.createdAt
+    ).getTime();
+
+  const expiresAt =
+    createdAt +
+    EDIT_TIME_LIMIT;
+
+  return Math.max(
+    0,
+    expiresAt - Date.now()
+  );
+}
+
+export function updateComment(
+  commentId: string,
+  text: string,
+  expectedUpdatedAt?: string
+) {
+  const comments =
+    getStoredComments();
+
+  const current =
+    comments.find(
+      (comment) =>
+        comment.id ===
+        commentId
+    );
+
+  if (!current) {
+    return {
+      success: false,
+      reason:
+        "Comment not found.",
+    };
+  }
+
+  const actor =
+    getCurrentActorId();
+
+  const owner =
+    (
+      current.user.email ||
+      current.user.username
+    ).toLowerCase();
+
+  if (
+    actor !== owner
+  ) {
+    return {
+      success: false,
+      reason:
+        "You can only edit your own comment.",
+    };
+  }
+
+  if (
+    expectedUpdatedAt &&
+    current.updatedAt !==
+      expectedUpdatedAt
+  ) {
+    return {
+      success: false,
+      reason:
+        "This comment was already changed. Please refresh and try again.",
+    };
+  }
+
+  if (
+    !canEditComment(
+      current,
+      actor
+    )
+  ) {
+    return {
+      success: false,
+      reason:
+        "The edit time limit for this comment has expired.",
+    };
+  }
+
+  const cleanText =
+    text.trim();
+
+  if (!cleanText) {
+    return {
+      success: false,
+      reason:
+        "Comment cannot be empty.",
+    };
+  }
+
+  const updatedAt =
+    new Date().toISOString();
+
+  const updatedComments =
+    comments.map(
+      (comment) =>
+        comment.id ===
+        commentId
+          ? {
+              ...comment,
+              text: cleanText,
+              updatedAt,
+              edited: true,
+            }
+          : comment
+    );
+
+  const saved =
+    saveAllComments(
+      updatedComments
+    );
+
+  if (!saved) {
+    return {
+      success: false,
+      reason:
+        "Unable to save comment.",
+    };
+  }
+
+  return {
+    success: true,
+    reason:
+      "Comment updated successfully.",
+  };
+}
+
+export function deleteComment(
+  commentId: string
+) {
+  const comments =
+    getStoredComments();
+
+  const comment =
+    comments.find(
+      (item) =>
+        item.id === commentId
+    );
+
+  if (!comment) {
+    return {
+      success: false,
+      reason:
+        "Comment not found.",
+    };
+  }
+
+  const actor =
+    getCurrentActorId();
+
+  const owner =
+    (
+      comment.user.email ||
+      comment.user.username
+    ).toLowerCase();
+
+  if (
+    actor !== owner
+  ) {
+    return {
+      success: false,
+      reason:
+        "You can only delete your own comment.",
+    };
+  }
+
+  /*
+   * Keep replies alive.
+   * If parent is removed,
+   * replies become top-level.
+   */
+  const updatedComments =
+    comments
+      .filter(
+        (item) =>
+          item.id !== commentId
+      )
+      .map((item) =>
+        item.parentId ===
+        commentId
+          ? {
+              ...item,
+              parentId: null,
+            }
+          : item
+      );
+
+  const saved =
+    saveAllComments(
+      updatedComments
+    );
+
+  if (!saved) {
+    return {
+      success: false,
+      reason:
+        "Unable to delete comment.",
+    };
+  }
+
+  return {
+    success: true,
+    reason:
+      "Comment deleted successfully.",
+  };
+}
+
+export function updateCommentReaction(
+  commentId: string,
+  type: "like" | "dislike"
+) {
+  const comments =
+    getStoredComments();
+
+  const actor =
+    getCurrentActorId();
+
+  const updated =
+    comments.map(
+      (comment) => {
+        if (
+          comment.id !==
+          commentId
+        ) {
+          return comment;
+        }
+
+        const likedBy =
+          Array.isArray(
+            comment.likedBy
+          )
+            ? [
+                ...comment.likedBy,
+              ]
+            : [];
+
+        const dislikedBy =
+          Array.isArray(
+            comment.dislikedBy
+          )
+            ? [
+                ...comment.dislikedBy,
+              ]
+            : [];
+
+        if (
+          type === "like"
+        ) {
+          const alreadyLiked =
+            likedBy.includes(
+              actor
+            );
+
+          const alreadyDisliked =
+            dislikedBy.includes(
+              actor
+            );
+
+          if (alreadyLiked) {
+            return {
+              ...comment,
+              likes: Math.max(
+                0,
+                comment.likes - 1
+              ),
+              likedBy:
+                likedBy.filter(
+                  (id) =>
+                    id !== actor
+                ),
+              likedByCurrentUser:
+                false,
+            };
+          }
+
+          if (
+            alreadyDisliked
+          ) {
+            const nextDislikedBy =
+              dislikedBy.filter(
+                (id) =>
+                  id !== actor
+              );
+
+            return {
+              ...comment,
+              likes:
+                comment.likes + 1,
+              dislikes:
+                Math.max(
+                  0,
+                  comment.dislikes -
+                    1
+                ),
+              likedBy: [
+                ...likedBy,
+                actor,
+              ],
+              dislikedBy:
+                nextDislikedBy,
+              likedByCurrentUser:
+                true,
+              dislikedByCurrentUser:
+                false,
+            };
+          }
+
+          return {
+            ...comment,
+            likes:
+              comment.likes + 1,
+            likedBy: [
+              ...likedBy,
+              actor,
+            ],
+            likedByCurrentUser:
+              true,
+          };
+        }
+
+        const alreadyDisliked =
+          dislikedBy.includes(
+            actor
+          );
+
+        const alreadyLiked =
+          likedBy.includes(
+            actor
+          );
+
+        if (
+          alreadyDisliked
+        ) {
+          return {
+            ...comment,
+            dislikes:
+              Math.max(
+                0,
+                comment.dislikes -
+                  1
+              ),
+            dislikedBy:
+              dislikedBy.filter(
+                (id) =>
+                  id !== actor
+              ),
+            dislikedByCurrentUser:
+              false,
+          };
+        }
+
+        if (alreadyLiked) {
+          return {
+            ...comment,
+            likes:
+              Math.max(
+                0,
+                comment.likes - 1
+              ),
+            dislikes:
+              comment.dislikes +
+              1,
+            likedBy:
+              likedBy.filter(
+                (id) =>
+                  id !== actor
+              ),
+            dislikedBy: [
+              ...dislikedBy,
+              actor,
+            ],
+            likedByCurrentUser:
+              false,
+            dislikedByCurrentUser:
+              true,
+          };
+        }
+
+        return {
+          ...comment,
+          dislikes:
+            comment.dislikes + 1,
+          dislikedBy: [
+            ...dislikedBy,
+            actor,
+          ],
+          dislikedByCurrentUser:
+            true,
+        };
+      }
+    );
+
+  saveAllComments(
+    updated
+  );
+
+  const updatedComment =
+    updated.find(
+      (comment) =>
+        comment.id ===
+        commentId
+    );
+
+  return updatedComment || null;
+}
+
+export function addCommentReport(
+  report: CommentReport
+) {
+  const reports =
+    readStorage<
+      CommentReport[]
+    >(
+      REPORT_KEY,
+      []
+    );
+
+  const alreadyReported =
+    reports.some(
+      (item) =>
+        item.commentId ===
+          report.commentId &&
+        item.reportedBy ===
+          report.reportedBy &&
+        item.reason ===
+          report.reason
+    );
+
+  if (
+    alreadyReported
+  ) {
+    return false;
+  }
+
+  const comment =
+    getCommentById(
+      report.commentId
+    );
+
+  if (!comment) {
+    return false;
+  }
+
+  const updatedReport =
+    {
+      ...report,
+      reportedBy:
+        report.reportedBy ||
+        getCurrentActorId(),
+    };
+
+  const saved =
+    writeStorage(
+      REPORT_KEY,
+      [
+        updatedReport,
+        ...reports,
+      ]
+    );
+
+  if (!saved) {
+    return false;
+  }
+
+  /*
+   * Mark the comment as reported.
+   */
+  const comments =
+    getStoredComments();
+
+  const updatedComments =
+    comments.map(
+      (item) =>
+        item.id ===
+        report.commentId
+          ? {
+              ...item,
+              reported: true,
+              reportReasons:
+                item.reportReasons.includes(
+                  report.reason
+                )
+                  ? item.reportReasons
+                  : [
+                      ...item.reportReasons,
+                      report.reason,
+                    ],
+            }
+          : item
+    );
+
+  saveAllComments(
+    updatedComments
+  );
+
+  return true;
+}
+
+export function getCommentReports(): CommentReport[] {
+  return readStorage<
+    CommentReport[]
+  >(
+    REPORT_KEY,
+    []
+  );
+}
+
+export function addModerationRecord(
+  record: ModerationRecord
+) {
+  const records =
+    readStorage<
+      ModerationRecord[]
+    >(
+      MODERATION_KEY,
+      []
+    );
+
+  const saved =
+    writeStorage(
+      MODERATION_KEY,
+      [
+        record,
+        ...records,
+      ]
+    );
+
+  return saved;
+}
+
+export function getModerationRecords(): ModerationRecord[] {
+  return readStorage<
+    ModerationRecord[]
+  >(
+    MODERATION_KEY,
+    []
+  );
+}
+
+export function createCommentId() {
+  return `comment_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 9)}`;
+}
+
+export function getCommentCount(
+  videoId: number
+) {
+  return getComments(
+    videoId
+  ).length;
+}
+
+export function clearAllComments() {
+  if (
+    typeof window === "undefined"
+  ) {
+    return;
+  }
+
+  localStorage.removeItem(
+    COMMENT_KEY
+  );
+
+  localStorage.removeItem(
+    REPORT_KEY
+  );
+
+  localStorage.removeItem(
+    MODERATION_KEY
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\deviceStorage.ts
+==============================
+export type DeviceInfo = {
+  id: string;
+  userEmail: string;
+  deviceName: string;
+  browser: string;
+  operatingSystem: string;
+  ipAddress: string;
+  location: string;
+  createdAt: string;
+  lastActiveAt: string;
+  trusted: boolean;
+  current: boolean;
+};
+
+export type OTPChallenge = {
+  id: string;
+  userEmail: string;
+  deviceId: string;
+  code: string;
+  createdAt: number;
+  expiresAt: number;
+  verified: boolean;
+};
+
+const DEVICES_KEY =
+  "youtube_trusted_devices";
+
+const OTP_KEY =
+  "youtube_otp_challenge";
+
+const OTP_EXPIRY =
+  5 * 60 * 1000;
+
+const OTP_COOLDOWN =
+  60 * 1000;
+
+function readJSON<T>(
+  key: string,
+  fallback: T
+): T {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return fallback;
+  }
+
+  try {
+    const data =
+      localStorage.getItem(key);
+
+    if (!data) {
+      return fallback;
+    }
+
+    return JSON.parse(
+      data
+    ) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJSON<T>(
+  key: string,
+  value: T
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify(value)
+    );
+  } catch (error) {
+    console.error(
+      `Failed to save ${key}:`,
+      error
+    );
+  }
+}
+
+/* =========================================
+   DEVICE ID
+========================================= */
+
+export function getDeviceId() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return "server";
+  }
+
+  const raw = [
+    navigator.userAgent,
+    navigator.language,
+    navigator.platform,
+    window.screen.width,
+    window.screen.height,
+    window.devicePixelRatio,
+    Intl.DateTimeFormat()
+      .resolvedOptions()
+      .timeZone,
+  ].join("|");
+
+  let hash = 0;
+
+  for (
+    let index = 0;
+    index < raw.length;
+    index++
+  ) {
+    hash =
+      (hash << 5) -
+      hash +
+      raw.charCodeAt(index);
+
+    hash |= 0;
+  }
+
+  return `device_${Math.abs(
+    hash
+  )}`;
+}
+
+/* =========================================
+   BROWSER
+========================================= */
+
+export function getBrowserName() {
+  if (
+    typeof navigator ===
+    "undefined"
+  ) {
+    return "Unknown";
+  }
+
+  const userAgent =
+    navigator.userAgent;
+
+  if (
+    /Edg/i.test(
+      userAgent
+    )
+  ) {
+    return "Microsoft Edge";
+  }
+
+  if (
+    /Chrome/i.test(
+      userAgent
+    ) &&
+    !/Edg/i.test(
+      userAgent
+    )
+  ) {
+    return "Google Chrome";
+  }
+
+  if (
+    /Firefox/i.test(
+      userAgent
+    )
+  ) {
+    return "Mozilla Firefox";
+  }
+
+  if (
+    /Safari/i.test(
+      userAgent
+    ) &&
+    !/Chrome/i.test(
+      userAgent
+    )
+  ) {
+    return "Safari";
+  }
+
+  return "Unknown Browser";
+}
+
+/* =========================================
+   OPERATING SYSTEM
+========================================= */
+
+export function getOperatingSystem() {
+  if (
+    typeof navigator ===
+    "undefined"
+  ) {
+    return "Unknown";
+  }
+
+  const userAgent =
+    navigator.userAgent;
+
+  if (
+    /Windows/i.test(
+      userAgent
+    )
+  ) {
+    return "Windows";
+  }
+
+  if (
+    /Mac OS X/i.test(
+      userAgent
+    )
+  ) {
+    return "macOS";
+  }
+
+  if (
+    /Android/i.test(
+      userAgent
+    )
+  ) {
+    return "Android";
+  }
+
+  if (
+    /iPhone|iPad/i.test(
+      userAgent
+    )
+  ) {
+    return "iOS";
+  }
+
+  if (
+    /Linux/i.test(
+      userAgent
+    )
+  ) {
+    return "Linux";
+  }
+
+  return "Unknown OS";
+}
+
+/* =========================================
+   DEVICE NAME
+========================================= */
+
+export function getDeviceName() {
+  return `${getOperatingSystem()} â€¢ ${getBrowserName()}`;
+}
+
+/* =========================================
+   DEVICE STORAGE
+========================================= */
+
+function getStoredDevices(): DeviceInfo[] {
+  return readJSON<
+    DeviceInfo[]
+  >(
+    DEVICES_KEY,
+    []
+  );
+}
+
+function saveDevices(
+  devices: DeviceInfo[]
+) {
+  writeJSON(
+    DEVICES_KEY,
+    devices
+  );
+}
+
+/* =========================================
+   GET USER DEVICES
+========================================= */
+
+export function getUserDevices(
+  userEmail: string
+) {
+  return getStoredDevices()
+    .filter(
+      (device) =>
+        device.userEmail ===
+        userEmail
+    )
+    .sort(
+      (a, b) =>
+        new Date(
+          b.lastActiveAt
+        ).getTime() -
+        new Date(
+          a.lastActiveAt
+        ).getTime()
+    );
+}
+
+/* =========================================
+   GET CURRENT DEVICE
+========================================= */
+
+export function getCurrentDevice(
+  userEmail: string
+) {
+  const deviceId =
+    getDeviceId();
+
+  return getStoredDevices().find(
+    (device) =>
+      device.userEmail ===
+        userEmail &&
+      device.id ===
+        deviceId
+  ) || null;
+}
+
+/* =========================================
+   CREATE / UPDATE DEVICE
+========================================= */
+
+export function createDevice(
+  userEmail: string,
+  ipAddress = "Unknown",
+  location = "Unknown"
+) {
+  const deviceId =
+    getDeviceId();
+
+  const now =
+    new Date().toISOString();
+
+  const devices =
+    getStoredDevices();
+
+  const existing =
+    devices.find(
+      (device) =>
+        device.userEmail ===
+          userEmail &&
+        device.id ===
+          deviceId
+    );
+
+  if (existing) {
+    const updated =
+      devices.map(
+        (device) => {
+          if (
+            device.userEmail ===
+              userEmail &&
+            device.id ===
+              deviceId
+          ) {
+            return {
+              ...device,
+              ipAddress,
+              location,
+              lastActiveAt:
+                now,
+              current: true,
+            };
+          }
+
+          return {
+            ...device,
+            current: false,
+          };
+        }
+      );
+
+    saveDevices(
+      updated
+    );
+
+    return (
+      updated.find(
+        (device) =>
+          device.userEmail ===
+            userEmail &&
+          device.id ===
+            deviceId
+      ) || null
+    );
+  }
+
+  const updated =
+    devices.map(
+      (device) => ({
+        ...device,
+        current: false,
+      })
+    );
+
+  const newDevice: DeviceInfo =
+    {
+      id: deviceId,
+      userEmail,
+      deviceName:
+        getDeviceName(),
+      browser:
+        getBrowserName(),
+      operatingSystem:
+        getOperatingSystem(),
+      ipAddress,
+      location,
+      createdAt: now,
+      lastActiveAt: now,
+      trusted: false,
+      current: true,
+    };
+
+  saveDevices([
+    ...updated,
+    newDevice,
+  ]);
+
+  return newDevice;
+}
+
+/* =========================================
+   TRUST CHECK
+========================================= */
+
+export function isDeviceTrusted(
+  userEmail: string,
+  deviceId: string
+) {
+  return getStoredDevices().some(
+    (device) =>
+      device.userEmail ===
+        userEmail &&
+      device.id ===
+        deviceId &&
+      device.trusted
+  );
+}
+
+/*
+ * Device + IP + Location check.
+ *
+ * A trusted device is only treated as
+ * trusted for login when the known IP
+ * and location also match.
+ */
+export function isDeviceTrustedForLogin(
+  userEmail: string,
+  deviceId: string,
+  ipAddress: string,
+  location: string
+) {
+  const device =
+    getStoredDevices().find(
+      (item) =>
+        item.userEmail ===
+          userEmail &&
+        item.id ===
+          deviceId
+    );
+
+  if (!device) {
+    return false;
+  }
+
+  if (!device.trusted) {
+    return false;
+  }
+
+  /*
+   * When an old record did not contain
+   * IP/location, require verification.
+   */
+  if (
+    !device.ipAddress ||
+    device.ipAddress ===
+      "Unknown"
+  ) {
+    return false;
+  }
+
+  /*
+   * Unknown incoming IP/location should
+   * not automatically bypass verification.
+   */
+  if (
+    !ipAddress ||
+    ipAddress === "Unknown"
+  ) {
+    return false;
+  }
+
+  if (
+    !location ||
+    location === "Unknown"
+  ) {
+    return false;
+  }
+
+  const sameIp =
+    device.ipAddress ===
+    ipAddress;
+
+  const sameLocation =
+    device.location ===
+    location;
+
+  return (
+    sameIp &&
+    sameLocation
+  );
+}
+
+/* =========================================
+   TRUST DEVICE
+========================================= */
+
+export function trustDevice(
+  userEmail: string,
+  deviceId: string
+) {
+  const devices =
+    getStoredDevices();
+
+  const updated =
+    devices.map(
+      (device) => {
+        if (
+          device.userEmail ===
+            userEmail &&
+          device.id ===
+            deviceId
+        ) {
+          return {
+            ...device,
+            trusted: true,
+          };
+        }
+
+        return device;
+      }
+    );
+
+  saveDevices(
+    updated
+  );
+
+  return true;
+}
+
+/* =========================================
+   UPDATE DEVICE SECURITY DATA
+========================================= */
+
+export function updateDeviceSecurityInfo(
+  userEmail: string,
+  deviceId: string,
+  ipAddress: string,
+  location: string
+) {
+  const devices =
+    getStoredDevices();
+
+  const now =
+    new Date().toISOString();
+
+  const updated =
+    devices.map(
+      (device) => {
+        if (
+          device.userEmail ===
+            userEmail &&
+          device.id ===
+            deviceId
+        ) {
+          return {
+            ...device,
+            ipAddress,
+            location,
+            lastActiveAt:
+              now,
+            current: true,
+          };
+        }
+
+        return {
+          ...device,
+          current: false,
+        };
+      }
+    );
+
+  saveDevices(
+    updated
+  );
+
+  return (
+    updated.find(
+      (device) =>
+        device.userEmail ===
+          userEmail &&
+        device.id ===
+          deviceId
+    ) || null
+  );
+}
+
+/* =========================================
+   REMOVE / REVOKE DEVICE
+========================================= */
+
+export function revokeTrustedDevice(
+  userEmail: string,
+  deviceId: string
+) {
+  const devices =
+    getStoredDevices();
+
+  const updated =
+    devices.filter(
+      (device) =>
+        !(
+          device.userEmail ===
+            userEmail &&
+          device.id ===
+            deviceId
+        )
+    );
+
+  saveDevices(
+    updated
+  );
+
+  return true;
+}
+
+/* =========================================
+   OTP
+========================================= */
+
+export function getOTPChallenge():
+  | OTPChallenge
+  | null {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return null;
+  }
+
+  const challenge =
+    readJSON<
+      OTPChallenge | null
+    >(
+      OTP_KEY,
+      null
+    );
+
+  if (!challenge) {
+    return null;
+  }
+
+  if (
+    challenge.expiresAt <=
+    Date.now()
+  ) {
+    localStorage.removeItem(
+      OTP_KEY
+    );
+
+    return null;
+  }
+
+  return challenge;
+}
+
+export function canRequestOTP() {
+  const challenge =
+    getOTPChallenge();
+
+  if (!challenge) {
+    return true;
+  }
+
+  return (
+    Date.now() -
+      challenge.createdAt >=
+    OTP_COOLDOWN
+  );
+}
+
+export function createOTPChallenge(
+  userEmail: string,
+  deviceId: string
+) {
+  if (
+    !canRequestOTP()
+  ) {
+    return null;
+  }
+
+  const code =
+    Math.floor(
+      100000 +
+        Math.random() *
+          900000
+    ).toString();
+
+  const now =
+    Date.now();
+
+  const challenge: OTPChallenge =
+    {
+      id:
+        `otp_${now}_${Math.random()
+          .toString(36)
+          .slice(2, 8)}`,
+      userEmail,
+      deviceId,
+      code,
+      createdAt:
+        now,
+      expiresAt:
+        now +
+        OTP_EXPIRY,
+      verified: false,
+    };
+
+  writeJSON(
+    OTP_KEY,
+    challenge
+  );
+
+  return challenge;
+}
+
+export function verifyOTP(
+  code: string
+) {
+  const challenge =
+    getOTPChallenge();
+
+  if (!challenge) {
+    return {
+      success: false,
+      reason:
+        "OTP expired. Please request a new OTP.",
+    };
+  }
+
+  if (
+    challenge.verified
+  ) {
+    return {
+      success: false,
+      reason:
+        "This OTP has already been used.",
+    };
+  }
+
+  if (
+    challenge.code !==
+    code.trim()
+  ) {
+    return {
+      success: false,
+      reason:
+        "Invalid OTP.",
+    };
+  }
+
+  const verifiedChallenge: OTPChallenge =
+    {
+      ...challenge,
+      verified: true,
+    };
+
+  writeJSON(
+    OTP_KEY,
+    verifiedChallenge
+  );
+
+  return {
+    success: true,
+    reason:
+      "OTP verified successfully.",
+    challenge:
+      verifiedChallenge,
+  };
+}
+
+export function clearOTPChallenge() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  localStorage.removeItem(
+    OTP_KEY
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\downloadFileStorage.ts
+==============================
+const DB_NAME = "youtube_download_files";
+const DB_VERSION = 1;
+const STORE_NAME = "videos";
+
+type StoredVideo = {
+  downloadId: string;
+  blob: Blob;
+  fileName: string;
+};
+
+function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined") {
+      reject(new Error("IndexedDB is only available in the browser."));
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onerror = () => {
+      reject(request.error);
+    };
+
+    request.onupgradeneeded = () => {
+      const database = request.result;
+
+      if (!database.objectStoreNames.contains(STORE_NAME)) {
+        database.createObjectStore(STORE_NAME, {
+          keyPath: "downloadId",
+        });
+      }
+    };
+
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+  });
+}
+
+export async function saveDownloadedVideo(
+  downloadId: string,
+  blob: Blob,
+  fileName: string
+): Promise<void> {
+  const database = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+
+    const video: StoredVideo = {
+      downloadId,
+      blob,
+      fileName,
+    };
+
+    store.put(video);
+
+    transaction.oncomplete = () => {
+      database.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+export async function getDownloadedVideo(
+  downloadId: string
+): Promise<StoredVideo | null> {
+  const database = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(
+      STORE_NAME,
+      "readonly"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.get(downloadId);
+
+    request.onsuccess = () => {
+      database.close();
+      resolve(request.result ?? null);
+    };
+
+    request.onerror = () => {
+      database.close();
+      reject(request.error);
+    };
+  });
+}
+
+export async function deleteDownloadedVideo(
+  downloadId: string
+): Promise<void> {
+  const database = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+
+    store.delete(downloadId);
+
+    transaction.oncomplete = () => {
+      database.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+export async function clearDownloadedVideos(): Promise<void> {
+  const database = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+
+    store.clear();
+
+    transaction.oncomplete = () => {
+      database.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      database.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\downloadStorage.ts
+==============================
+import {
+  getCurrentPlan,
+  type SubscriptionPlan,
+} from "@/lib/subscriptionStorage";
+
+export type DownloadStatus =
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type DownloadRecord = {
+  id: string;
+  userId: string;
+  videoId: number;
+  title: string;
+  thumbnail: string;
+  downloadedAt: string;
+  status: DownloadStatus;
+  fileSize: number;
+  fileName: string;
+  subscriptionPlan: SubscriptionPlan;
+  quotaLimit: number;
+  quotaUsed: number;
+  remainingQuota: number;
+
+  /*
+   * Audit information.
+   * These fields are best-effort on the client.
+   * A real backend/database is required for trusted
+   * IP logging and secure audit records.
+   */
+  ipAddress?: string;
+  browser?: string;
+  operatingSystem?: string;
+  deviceType?: string;
+  deviceModel?: string;
+  location?: string;
+
+  errorMessage?: string;
+  startedAt?: string;
+  updatedAt?: string;
+};
+
+type DownloadRecordInput =
+  Omit<
+    DownloadRecord,
+    | "id"
+    | "downloadedAt"
+    | "quotaUsed"
+    | "remainingQuota"
+    | "subscriptionPlan"
+    | "quotaLimit"
+  > &
+  Partial<
+    Pick<
+      DownloadRecord,
+      "subscriptionPlan" | "quotaLimit"
+    >
+  >;
+
+type FailedDownloadInput =
+  Omit<
+    DownloadRecord,
+    | "id"
+    | "downloadedAt"
+    | "status"
+    | "quotaUsed"
+    | "remainingQuota"
+    | "subscriptionPlan"
+    | "quotaLimit"
+  > &
+  Partial<
+    Pick<
+      DownloadRecord,
+      "subscriptionPlan" | "quotaLimit"
+    >
+  >;
+
+export const DOWNLOAD_LIMITS: Record<
+  SubscriptionPlan,
+  number
+> = {
+  Free: 1,
+  Bronze: 5,
+  Silver: 10,
+  Gold: 20,
+};
+
+const DOWNLOAD_KEY =
+  "youtube_download_records";
+
+const DOWNLOAD_LOCK_KEY =
+  "youtube_download_locks";
+
+const DUPLICATE_WINDOW_MS =
+  24 * 60 * 60 * 1000;
+
+const LOCK_TIMEOUT_MS =
+  10 * 60 * 1000;
+
+export function getSubscriptionPlan(): SubscriptionPlan {
+  return getCurrentPlan();
+}
+
+function isSubscriptionPlan(
+  value: unknown
+): value is SubscriptionPlan {
+  return (
+    value === "Free" ||
+    value === "Bronze" ||
+    value === "Silver" ||
+    value === "Gold"
+  );
+}
+
+function isDownloadStatus(
+  value: unknown
+): value is DownloadStatus {
+  return (
+    value === "completed" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
+function isValidDownloadRecord(
+  value: unknown
+): value is DownloadRecord {
+  if (
+    !value ||
+    typeof value !== "object"
+  ) {
+    return false;
+  }
+
+  const record =
+    value as Partial<DownloadRecord>;
+
+  return (
+    typeof record.id === "string" &&
+    typeof record.userId === "string" &&
+    typeof record.videoId === "number" &&
+    typeof record.title === "string" &&
+    typeof record.thumbnail === "string" &&
+    typeof record.downloadedAt === "string" &&
+    isDownloadStatus(record.status) &&
+    typeof record.fileSize === "number" &&
+    typeof record.fileName === "string" &&
+    isSubscriptionPlan(
+      record.subscriptionPlan
+    ) &&
+    typeof record.quotaLimit ===
+      "number" &&
+    typeof record.quotaUsed ===
+      "number" &&
+    typeof record.remainingQuota ===
+      "number"
+  );
+}
+
+function getStoredRecords(): DownloadRecord[] {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return [];
+  }
+
+  try {
+    const data =
+      localStorage.getItem(
+        DOWNLOAD_KEY
+      );
+
+    if (!data) {
+      return [];
+    }
+
+    const parsed =
+      JSON.parse(data);
+
+    if (
+      !Array.isArray(parsed)
+    ) {
+      return [];
+    }
+
+    return parsed.filter(
+      isValidDownloadRecord
+    );
+  } catch (error) {
+    console.error(
+      "Failed to load download records:",
+      error
+    );
+
+    return [];
+  }
+}
+
+function saveRecords(
+  records: DownloadRecord[]
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return false;
+  }
+
+  try {
+    localStorage.setItem(
+      DOWNLOAD_KEY,
+      JSON.stringify(records)
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "Failed to save download records:",
+      error
+    );
+
+    return false;
+  }
+}
+
+function startOfToday() {
+  const date =
+    new Date();
+
+  date.setHours(
+    0,
+    0,
+    0,
+    0
+  );
+
+  return date.getTime();
+}
+
+function getRecordTime(
+  record: DownloadRecord
+) {
+  const time =
+    new Date(
+      record.downloadedAt
+    ).getTime();
+
+  return Number.isFinite(time)
+    ? time
+    : 0;
+}
+
+function cleanupExpiredLocks() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    const raw =
+      localStorage.getItem(
+        DOWNLOAD_LOCK_KEY
+      );
+
+    if (!raw) {
+      return;
+    }
+
+    const locks =
+      JSON.parse(raw);
+
+    if (
+      !locks ||
+      typeof locks !==
+        "object"
+    ) {
+      localStorage.removeItem(
+        DOWNLOAD_LOCK_KEY
+      );
+
+      return;
+    }
+
+    const now =
+      Date.now();
+
+    const activeLocks =
+      Object.fromEntries(
+        Object.entries(
+          locks
+        ).filter(
+          ([, value]) => {
+            if (
+              !value ||
+              typeof value !==
+                "object"
+            ) {
+              return false;
+            }
+
+            const createdAt =
+              Number(
+                (
+                  value as {
+                    createdAt?: number;
+                  }
+                ).createdAt
+              );
+
+            return (
+              Number.isFinite(
+                createdAt
+              ) &&
+              now - createdAt <
+                LOCK_TIMEOUT_MS
+            );
+          }
+        )
+      );
+
+    localStorage.setItem(
+      DOWNLOAD_LOCK_KEY,
+      JSON.stringify(
+        activeLocks
+      )
+    );
+  } catch {
+    localStorage.removeItem(
+      DOWNLOAD_LOCK_KEY
+    );
+  }
+}
+
+function getDownloadLockKey(
+  userId: string,
+  videoId: number
+) {
+  return `${userId}::${videoId}`;
+}
+
+function hasActiveDownloadLock(
+  userId: string,
+  videoId: number
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return false;
+  }
+
+  cleanupExpiredLocks();
+
+  try {
+    const raw =
+      localStorage.getItem(
+        DOWNLOAD_LOCK_KEY
+      );
+
+    if (!raw) {
+      return false;
+    }
+
+    const locks =
+      JSON.parse(raw);
+
+    const lockKey =
+      getDownloadLockKey(
+        userId,
+        videoId
+      );
+
+    const lock =
+      locks?.[lockKey];
+
+    if (
+      !lock ||
+      typeof lock !==
+        "object"
+    ) {
+      return false;
+    }
+
+    const createdAt =
+      Number(
+        lock.createdAt
+      );
+
+    return (
+      Number.isFinite(
+        createdAt
+      ) &&
+      Date.now() -
+        createdAt <
+        LOCK_TIMEOUT_MS
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function beginDownloadLock(
+  userId: string,
+  videoId: number
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return false;
+  }
+
+  cleanupExpiredLocks();
+
+  if (
+    hasActiveDownloadLock(
+      userId,
+      videoId
+    )
+  ) {
+    return false;
+  }
+
+  try {
+    const raw =
+      localStorage.getItem(
+        DOWNLOAD_LOCK_KEY
+      );
+
+    const locks =
+      raw
+        ? JSON.parse(raw)
+        : {};
+
+    locks[
+      getDownloadLockKey(
+        userId,
+        videoId
+      )
+    ] = {
+      createdAt:
+        Date.now(),
+      userId,
+      videoId,
+    };
+
+    localStorage.setItem(
+      DOWNLOAD_LOCK_KEY,
+      JSON.stringify(
+        locks
+      )
+    );
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function endDownloadLock(
+  userId: string,
+  videoId: number
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    const raw =
+      localStorage.getItem(
+        DOWNLOAD_LOCK_KEY
+      );
+
+    if (!raw) {
+      return;
+    }
+
+    const locks =
+      JSON.parse(raw);
+
+    delete locks[
+      getDownloadLockKey(
+        userId,
+        videoId
+      )
+    ];
+
+    localStorage.setItem(
+      DOWNLOAD_LOCK_KEY,
+      JSON.stringify(
+        locks
+      )
+    );
+  } catch {
+    localStorage.removeItem(
+      DOWNLOAD_LOCK_KEY
+    );
+  }
+}
+
+export function getTodayDownloads(
+  userId: string
+) {
+  const today =
+    startOfToday();
+
+  return getStoredRecords()
+    .filter(
+      (record) =>
+        record.userId ===
+          userId &&
+        getRecordTime(
+          record
+        ) >= today &&
+        record.status ===
+          "completed"
+    )
+    .sort(
+      (a, b) =>
+        getRecordTime(b) -
+        getRecordTime(a)
+    );
+}
+
+export function getTodayDownloadCount(
+  userId: string
+) {
+  return getTodayDownloads(
+    userId
+  ).length;
+}
+
+export function getRemainingQuota(
+  userId: string,
+  plan?: SubscriptionPlan
+) {
+  const currentPlan =
+    plan ??
+    getSubscriptionPlan();
+
+  const limit =
+    DOWNLOAD_LIMITS[
+      currentPlan
+    ];
+
+  const used =
+    getTodayDownloadCount(
+      userId
+    );
+
+  return Math.max(
+    0,
+    limit - used
+  );
+}
+
+export function canDownloadVideo(
+  userId: string,
+  videoId: number,
+  plan?: SubscriptionPlan
+) {
+  const currentPlan =
+    plan ??
+    getSubscriptionPlan();
+
+  const todayDownloads =
+    getTodayDownloads(
+      userId
+    );
+
+  const alreadyDownloaded =
+    todayDownloads.some(
+      (record) =>
+        record.videoId ===
+        videoId
+    );
+
+  if (
+    alreadyDownloaded
+  ) {
+    return {
+      allowed: false,
+      reason:
+        "This video has already been downloaded today.",
+    };
+  }
+
+  if (
+    hasActiveDownloadLock(
+      userId,
+      videoId
+    )
+  ) {
+    return {
+      allowed: false,
+      reason:
+        "This video is already being downloaded. Please wait.",
+    };
+  }
+
+  const limit =
+    DOWNLOAD_LIMITS[
+      currentPlan
+    ];
+
+  if (
+    todayDownloads.length >=
+    limit
+  ) {
+    return {
+      allowed: false,
+      reason:
+        `Your ${currentPlan} plan has reached its daily download limit.`,
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: "",
+  };
+}
+
+export function createDownloadRecord(
+  data: DownloadRecordInput
+) {
+  const currentPlan =
+    getSubscriptionPlan();
+
+  const quotaLimit =
+    DOWNLOAD_LIMITS[
+      currentPlan
+    ];
+
+  const quotaUsed =
+    getTodayDownloadCount(
+      data.userId
+    ) + 1;
+
+  const now =
+    new Date().toISOString();
+
+  const record: DownloadRecord =
+    {
+      ...data,
+
+      /*
+       * Never trust plan/quota values supplied
+       * by the caller. Always calculate from
+       * the current subscription state.
+       */
+      subscriptionPlan:
+        currentPlan,
+
+      quotaLimit,
+
+      id:
+        `download_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 10)}`,
+
+      downloadedAt:
+        now,
+
+      quotaUsed,
+
+      remainingQuota:
+        Math.max(
+          0,
+          quotaLimit -
+            quotaUsed
+        ),
+
+      startedAt:
+        data.startedAt ??
+        now,
+
+      updatedAt:
+        now,
+    };
+
+  const records =
+    getStoredRecords();
+
+  /*
+   * Final duplicate protection.
+   */
+  const duplicate =
+    records.some(
+      (existing) =>
+        existing.userId ===
+          data.userId &&
+        existing.videoId ===
+          data.videoId &&
+        existing.status ===
+          "completed" &&
+        Date.now() -
+          getRecordTime(
+            existing
+          ) <
+          DUPLICATE_WINDOW_MS
+    );
+
+  if (duplicate) {
+    endDownloadLock(
+      data.userId,
+      data.videoId
+    );
+
+    throw new Error(
+      "This video has already been downloaded recently."
+    );
+  }
+
+  const saved =
+    saveRecords([
+      record,
+      ...records,
+    ]);
+
+  if (!saved) {
+    endDownloadLock(
+      data.userId,
+      data.videoId
+    );
+
+    throw new Error(
+      "Unable to save download record."
+    );
+  }
+
+  endDownloadLock(
+    data.userId,
+    data.videoId
+  );
+
+  return record;
+}
+
+export function addFailedDownload(
+  data: FailedDownloadInput
+) {
+  const currentPlan =
+    getSubscriptionPlan();
+
+  const quotaLimit =
+    DOWNLOAD_LIMITS[
+      currentPlan
+    ];
+
+  const now =
+    new Date().toISOString();
+
+  const record: DownloadRecord =
+    {
+      ...data,
+
+      id:
+        `download_failed_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 10)}`,
+
+      downloadedAt:
+        now,
+
+      status:
+        "failed",
+
+      subscriptionPlan:
+        currentPlan,
+
+      quotaLimit,
+
+      quotaUsed:
+        getTodayDownloadCount(
+          data.userId
+        ),
+
+      remainingQuota:
+        getRemainingQuota(
+          data.userId,
+          currentPlan
+        ),
+
+      startedAt:
+        data.startedAt ??
+        now,
+
+      updatedAt:
+        now,
+
+      errorMessage:
+        data.errorMessage ??
+        "Download failed.",
+    };
+
+  const records =
+    getStoredRecords();
+
+  const saved =
+    saveRecords([
+      record,
+      ...records,
+    ]);
+
+  endDownloadLock(
+    data.userId,
+    data.videoId
+  );
+
+  if (!saved) {
+    console.error(
+      "Failed to save failed download record."
+    );
+  }
+
+  return record;
+}
+
+export function addCancelledDownload(
+  data: FailedDownloadInput
+) {
+  const currentPlan =
+    getSubscriptionPlan();
+
+  const quotaLimit =
+    DOWNLOAD_LIMITS[
+      currentPlan
+    ];
+
+  const now =
+    new Date().toISOString();
+
+  const record: DownloadRecord =
+    {
+      ...data,
+
+      id:
+        `download_cancelled_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 10)}`,
+
+      downloadedAt:
+        now,
+
+      status:
+        "cancelled",
+
+      subscriptionPlan:
+        currentPlan,
+
+      quotaLimit,
+
+      quotaUsed:
+        getTodayDownloadCount(
+          data.userId
+        ),
+
+      remainingQuota:
+        getRemainingQuota(
+          data.userId,
+          currentPlan
+        ),
+
+      startedAt:
+        data.startedAt ??
+        now,
+
+      updatedAt:
+        now,
+
+      errorMessage:
+        data.errorMessage ??
+        "Download cancelled.",
+    };
+
+  const records =
+    getStoredRecords();
+
+  saveRecords([
+    record,
+    ...records,
+  ]);
+
+  endDownloadLock(
+    data.userId,
+    data.videoId
+  );
+
+  return record;
+}
+
+export function getDownloadRecords(
+  userId: string
+) {
+  return getStoredRecords()
+    .filter(
+      (record) =>
+        record.userId ===
+        userId
+    )
+    .sort(
+      (a, b) =>
+        getRecordTime(b) -
+        getRecordTime(a)
+    );
+}
+
+export function getAllDownloadRecords() {
+  return getStoredRecords().sort(
+    (a, b) =>
+      getRecordTime(b) -
+      getRecordTime(a)
+  );
+}
+
+export function getDownloadRecord(
+  downloadId: string
+) {
+  return getStoredRecords().find(
+    (record) =>
+      record.id ===
+      downloadId
+  );
+}
+
+export function getDownloadHistoryForVideo(
+  userId: string,
+  videoId: number
+) {
+  return getStoredRecords()
+    .filter(
+      (record) =>
+        record.userId ===
+          userId &&
+        record.videoId ===
+          videoId
+    )
+    .sort(
+      (a, b) =>
+        getRecordTime(b) -
+        getRecordTime(a)
+    );
+}
+
+export function clearDownloadRecords(
+  userId: string
+) {
+  const records =
+    getStoredRecords();
+
+  const updated =
+    records.filter(
+      (record) =>
+        record.userId !==
+        userId
+    );
+
+  saveRecords(
+    updated
+  );
+}
+
+export function formatFileSize(
+  bytes: number
+) {
+  if (
+    !Number.isFinite(
+      bytes
+    ) ||
+    bytes <= 0
+  ) {
+    return "0 B";
+  }
+
+  const units = [
+    "B",
+    "KB",
+    "MB",
+    "GB",
+  ];
+
+  const index =
+    Math.min(
+      units.length - 1,
+      Math.floor(
+        Math.log(bytes) /
+          Math.log(1024)
+      )
+    );
+
+  const size =
+    bytes /
+    Math.pow(
+      1024,
+      index
+    );
+
+  return `${size.toFixed(
+    index === 0 ? 0 : 2
+  )} ${units[index]}`;
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\notificationStorage.ts
+==============================
+export type NotificationItem = {
+  id: number;
+  title: string;
+  message: string;
+  time: string;
+  read: boolean;
+};
+
+const NOTIFICATION_KEY = "youtube_notifications";
+
+function getStoredNotifications(): NotificationItem[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const data = localStorage.getItem(
+      NOTIFICATION_KEY
+    );
+
+    if (!data) {
+      return [];
+    }
+
+    const parsed = JSON.parse(data);
+
+    return Array.isArray(parsed)
+      ? parsed
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveNotifications(
+  notifications: NotificationItem[]
+) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  localStorage.setItem(
+    NOTIFICATION_KEY,
+    JSON.stringify(notifications)
+  );
+
+  window.dispatchEvent(
+    new Event("youtube-notifications-updated")
+  );
+}
+
+export function getNotifications() {
+  return getStoredNotifications();
+}
+
+export function addNotification(
+  title: string,
+  message: string
+) {
+  const notifications =
+    getStoredNotifications();
+
+  const newNotification: NotificationItem = {
+    id: Date.now(),
+    title,
+    message,
+    time: "Just now",
+    read: false,
+  };
+
+  saveNotifications([
+    newNotification,
+    ...notifications,
+  ].slice(0, 50));
+}
+
+export function markNotificationAsRead(
+  id: number
+) {
+  const notifications =
+    getStoredNotifications();
+
+  saveNotifications(
+    notifications.map((item) =>
+      item.id === id
+        ? { ...item, read: true }
+        : item
+    )
+  );
+}
+
+export function markAllNotificationsAsRead() {
+  const notifications =
+    getStoredNotifications();
+
+  saveNotifications(
+    notifications.map((item) => ({
+      ...item,
+      read: true,
+    }))
+  );
+}
+
+export function clearNotifications() {
+  saveNotifications([]);
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\paymentStorage.ts
+==============================
+export type PaymentStatus =
+  | "success"
+  | "failed"
+  | "pending"
+  | "cancelled";
+
+export type PaymentType =
+  | "subscription"
+  | "upgrade"
+  | "downgrade"
+  | "renewal";
+
+export type PaymentPlan =
+  | "Bronze"
+  | "Silver"
+  | "Gold";
+
+export type PaymentRecord = {
+  id: string;
+
+  userId: string;
+
+  plan: PaymentPlan;
+
+  amount: number;
+
+  currency: "INR";
+
+  paymentId: string | null;
+
+  orderId: string | null;
+
+  status: PaymentStatus;
+
+  type: PaymentType;
+
+  createdAt: string;
+
+  /*
+   * Transaction / invoice details
+   */
+  invoiceNumber?: string;
+
+  subscriptionStartDate?: string | null;
+
+  subscriptionExpiryDate?: string | null;
+
+  renewalDate?: string | null;
+
+  autoRenew?: boolean;
+
+  /*
+   * Useful payment metadata
+   */
+  method?: string | null;
+
+  failureReason?: string | null;
+
+  notes?: string | null;
+
+  updatedAt?: string;
+};
+
+const PAYMENT_KEY =
+  "youtube_payment_records";
+
+const INVOICE_PREFIX =
+  "YTCLONE-INV";
+
+function createPaymentId(
+  prefix: string
+) {
+  return `${prefix}_${Date.now()}_${Math.random()
+    .toString(36)
+    .slice(2, 10)}`;
+}
+
+function createInvoiceNumber() {
+  const year =
+    new Date().getFullYear();
+
+  return `${INVOICE_PREFIX}-${year}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 7)
+    .toUpperCase()}`;
+}
+
+function isPaymentStatus(
+  value: unknown
+): value is PaymentStatus {
+  return (
+    value === "success" ||
+    value === "failed" ||
+    value === "pending" ||
+    value === "cancelled"
+  );
+}
+
+function isPaymentType(
+  value: unknown
+): value is PaymentType {
+  return (
+    value === "subscription" ||
+    value === "upgrade" ||
+    value === "downgrade" ||
+    value === "renewal"
+  );
+}
+
+function isPaymentPlan(
+  value: unknown
+): value is PaymentPlan {
+  return (
+    value === "Bronze" ||
+    value === "Silver" ||
+    value === "Gold"
+  );
+}
+
+function isValidPaymentRecord(
+  value: unknown
+): value is PaymentRecord {
+  if (
+    !value ||
+    typeof value !==
+      "object"
+  ) {
+    return false;
+  }
+
+  const record =
+    value as Partial<PaymentRecord>;
+
+  return (
+    typeof record.id ===
+      "string" &&
+    typeof record.userId ===
+      "string" &&
+    isPaymentPlan(
+      record.plan
+    ) &&
+    typeof record.amount ===
+      "number" &&
+    record.currency ===
+      "INR" &&
+    (
+      record.paymentId ===
+        null ||
+      typeof record.paymentId ===
+        "string"
+    ) &&
+    (
+      record.orderId ===
+        null ||
+      typeof record.orderId ===
+        "string"
+    ) &&
+    isPaymentStatus(
+      record.status
+    ) &&
+    isPaymentType(
+      record.type
+    ) &&
+    typeof record.createdAt ===
+      "string"
+  );
+}
+
+function getStoredPayments(): PaymentRecord[] {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return [];
+  }
+
+  try {
+    const data =
+      localStorage.getItem(
+        PAYMENT_KEY
+      );
+
+    if (!data) {
+      return [];
+    }
+
+    const parsed =
+      JSON.parse(data);
+
+    if (
+      !Array.isArray(parsed)
+    ) {
+      return [];
+    }
+
+    return parsed.filter(
+      isValidPaymentRecord
+    );
+  } catch (error) {
+    console.error(
+      "Failed to load payment history:",
+      error
+    );
+
+    return [];
+  }
+}
+
+function savePayments(
+  payments: PaymentRecord[]
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return false;
+  }
+
+  try {
+    localStorage.setItem(
+      PAYMENT_KEY,
+      JSON.stringify(
+        payments
+      )
+    );
+
+    return true;
+  } catch (error) {
+    console.error(
+      "Failed to save payment history:",
+      error
+    );
+
+    return false;
+  }
+}
+
+/*
+ * Find an existing payment using
+ * Razorpay payment ID.
+ */
+export function getPaymentByPaymentId(
+  paymentId: string
+) {
+  if (!paymentId) {
+    return undefined;
+  }
+
+  return getStoredPayments().find(
+    (payment) =>
+      payment.paymentId ===
+      paymentId
+  );
+}
+
+/*
+ * Find an existing payment using
+ * Razorpay order ID.
+ */
+export function getPaymentByOrderId(
+  orderId: string
+) {
+  if (!orderId) {
+    return undefined;
+  }
+
+  return getStoredPayments().find(
+    (payment) =>
+      payment.orderId ===
+      orderId
+  );
+}
+
+/*
+ * Check whether a payment ID or order ID
+ * has already been recorded.
+ */
+export function isDuplicatePayment(
+  paymentId?: string | null,
+  orderId?: string | null
+) {
+  const payments =
+    getStoredPayments();
+
+  return payments.some(
+    (payment) =>
+      (
+        !!paymentId &&
+        payment.paymentId ===
+          paymentId
+      ) ||
+      (
+        !!orderId &&
+        payment.orderId ===
+          orderId
+      )
+  );
+}
+
+/*
+ * Create a verified payment record.
+ *
+ * Duplicate payment/order IDs are not
+ * inserted again.
+ */
+export function createPaymentRecord(
+  data: Omit<
+    PaymentRecord,
+    "id" | "createdAt"
+  >
+) {
+  const payments =
+    getStoredPayments();
+
+  const existing =
+    payments.find(
+      (payment) =>
+        (
+          !!data.paymentId &&
+          payment.paymentId ===
+            data.paymentId
+        ) ||
+        (
+          !!data.orderId &&
+          payment.orderId ===
+            data.orderId
+        )
+    );
+
+  if (existing) {
+    return existing;
+  }
+
+  const now =
+    new Date().toISOString();
+
+  const record: PaymentRecord =
+    {
+      ...data,
+
+      id:
+        createPaymentId(
+          "payment"
+        ),
+
+      createdAt:
+        now,
+
+      invoiceNumber:
+        data.invoiceNumber ??
+        createInvoiceNumber(),
+
+      updatedAt:
+        now,
+    };
+
+  const saved =
+    savePayments([
+      record,
+      ...payments,
+    ]);
+
+  if (!saved) {
+    throw new Error(
+      "Unable to save payment record."
+    );
+  }
+
+  return record;
+}
+
+/*
+ * Create a pending payment record.
+ */
+export function createPendingPaymentRecord(
+  data: Omit<
+    PaymentRecord,
+    "id" |
+      "createdAt" |
+      "status"
+  >
+) {
+  return createPaymentRecord({
+    ...data,
+    status:
+      "pending",
+  });
+}
+
+/*
+ * Create a failed payment record.
+ */
+export function createFailedPaymentRecord(
+  data: Omit<
+    PaymentRecord,
+    "id" |
+      "createdAt" |
+      "status"
+  >
+) {
+  return createPaymentRecord({
+    ...data,
+    status:
+      "failed",
+  });
+}
+
+/*
+ * Create a cancelled payment record.
+ */
+export function createCancelledPaymentRecord(
+  data: Omit<
+    PaymentRecord,
+    "id" |
+      "createdAt" |
+      "status"
+  >
+) {
+  return createPaymentRecord({
+    ...data,
+    status:
+      "cancelled",
+  });
+}
+
+/*
+ * Update an existing payment record.
+ */
+export function updatePaymentRecord(
+  paymentRecordId: string,
+  updates: Partial<
+    Omit<
+      PaymentRecord,
+      "id" | "createdAt"
+    >
+  >
+) {
+  const payments =
+    getStoredPayments();
+
+  const index =
+    payments.findIndex(
+      (payment) =>
+        payment.id ===
+        paymentRecordId
+    );
+
+  if (index === -1) {
+    return undefined;
+  }
+
+  const existing =
+    payments[index];
+
+  const updated:
+    PaymentRecord =
+    {
+      ...existing,
+      ...updates,
+      updatedAt:
+        new Date().toISOString(),
+    };
+
+  payments[index] =
+    updated;
+
+  const saved =
+    savePayments(
+      payments
+    );
+
+  if (!saved) {
+    throw new Error(
+      "Unable to update payment record."
+    );
+  }
+
+  return updated;
+}
+
+/*
+ * Update a payment by Razorpay payment ID.
+ */
+export function updatePaymentByPaymentId(
+  paymentId: string,
+  updates: Partial<
+    Omit<
+      PaymentRecord,
+      "id" | "createdAt"
+    >
+  >
+) {
+  const existing =
+    getPaymentByPaymentId(
+      paymentId
+    );
+
+  if (!existing) {
+    return undefined;
+  }
+
+  return updatePaymentRecord(
+    existing.id,
+    updates
+  );
+}
+
+/*
+ * Update a payment by Razorpay order ID.
+ */
+export function updatePaymentByOrderId(
+  orderId: string,
+  updates: Partial<
+    Omit<
+      PaymentRecord,
+      "id" | "createdAt"
+    >
+  >
+) {
+  const existing =
+    getPaymentByOrderId(
+      orderId
+    );
+
+  if (!existing) {
+    return undefined;
+  }
+
+  return updatePaymentRecord(
+    existing.id,
+    updates
+  );
+}
+
+/*
+ * Get payment history for one user.
+ */
+export function getPaymentHistory(
+  userId: string
+) {
+  return getStoredPayments()
+    .filter(
+      (payment) =>
+        payment.userId ===
+        userId
+    )
+    .sort(
+      (a, b) =>
+        new Date(
+          b.createdAt
+        ).getTime() -
+        new Date(
+          a.createdAt
+        ).getTime()
+    );
+}
+
+/*
+ * Get all payment records.
+ */
+export function getAllPaymentRecords() {
+  return getStoredPayments().sort(
+    (a, b) =>
+      new Date(
+        b.createdAt
+      ).getTime() -
+      new Date(
+        a.createdAt
+      ).getTime()
+  );
+}
+
+/*
+ * Get one payment record.
+ */
+export function getPaymentRecord(
+  paymentRecordId: string
+) {
+  return getStoredPayments().find(
+    (payment) =>
+      payment.id ===
+      paymentRecordId
+  );
+}
+
+/*
+ * Get successful payments only.
+ */
+export function getSuccessfulPayments(
+  userId: string
+) {
+  return getPaymentHistory(
+    userId
+  ).filter(
+    (payment) =>
+      payment.status ===
+      "success"
+  );
+}
+
+/*
+ * Get failed payments.
+ */
+export function getFailedPayments(
+  userId: string
+) {
+  return getPaymentHistory(
+    userId
+  ).filter(
+    (payment) =>
+      payment.status ===
+      "failed"
+  );
+}
+
+/*
+ * Get cancelled payments.
+ */
+export function getCancelledPayments(
+  userId: string
+) {
+  return getPaymentHistory(
+    userId
+  ).filter(
+    (payment) =>
+      payment.status ===
+      "cancelled"
+  );
+}
+
+/*
+ * Get pending payments.
+ */
+export function getPendingPayments(
+  userId: string
+) {
+  return getPaymentHistory(
+    userId
+  ).filter(
+    (payment) =>
+      payment.status ===
+      "pending"
+  );
+}
+
+/*
+ * Clear payment history for one user.
+ */
+export function clearPaymentHistory(
+  userId: string
+) {
+  const payments =
+    getStoredPayments();
+
+  const updated =
+    payments.filter(
+      (payment) =>
+        payment.userId !==
+        userId
+    );
+
+  savePayments(
+    updated
+  );
+}
+
+/*
+ * Clear all payment records.
+ * Useful only for local development/testing.
+ */
+export function clearAllPaymentRecords() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  localStorage.removeItem(
+    PAYMENT_KEY
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\securityStorage.ts
+==============================
+export type LoginEventType =
+  | "login_attempt"
+  | "login_success"
+  | "otp_required"
+  | "otp_success"
+  | "otp_failed"
+  | "device_removed";
+
+export type LoginHistoryRecord = {
+  id: string;
+  userEmail: string;
+  event: LoginEventType;
+  timestamp: string;
+  ipAddress: string;
+  browser: string;
+  browserVersion: string;
+  operatingSystem: string;
+  deviceType: "Desktop" | "Mobile" | "Tablet";
+  deviceModel: string;
+  city: string;
+  state: string;
+  country: string;
+  approximateLocation: string;
+  deviceId: string;
+  success: boolean;
+  message: string;
+};
+
+const LOGIN_HISTORY_KEY =
+  "youtube_login_history";
+
+function readJSON<T>(
+  key: string,
+  fallback: T
+): T {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return fallback;
+  }
+
+  try {
+    const data =
+      localStorage.getItem(
+        key
+      );
+
+    if (!data) {
+      return fallback;
+    }
+
+    return JSON.parse(
+      data
+    ) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveJSON<T>(
+  key: string,
+  value: T
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify(value)
+    );
+  } catch (error) {
+    console.error(
+      `Failed to save ${key}:`,
+      error
+    );
+  }
+}
+
+export function getLoginHistory(
+  userEmail: string
+) {
+  return readJSON<
+    LoginHistoryRecord[]
+  >(
+    LOGIN_HISTORY_KEY,
+    []
+  )
+    .filter(
+      (record) =>
+        record.userEmail ===
+        userEmail
+    )
+    .sort(
+      (a, b) =>
+        new Date(
+          b.timestamp
+        ).getTime() -
+        new Date(
+          a.timestamp
+        ).getTime()
+    );
+}
+
+export function getAllLoginHistory() {
+  return readJSON<
+    LoginHistoryRecord[]
+  >(
+    LOGIN_HISTORY_KEY,
+    []
+  );
+}
+
+export function addLoginHistory(
+  record: Omit<
+    LoginHistoryRecord,
+    "id" | "timestamp"
+  >
+) {
+  const history =
+    getAllLoginHistory();
+
+  const newRecord: LoginHistoryRecord =
+    {
+      ...record,
+      id:
+        `login_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 9)}`,
+      timestamp:
+        new Date().toISOString(),
+    };
+
+  saveJSON(
+    LOGIN_HISTORY_KEY,
+    [
+      newRecord,
+      ...history,
+    ]
+  );
+
+  return newRecord;
+}
+
+export function clearLoginHistory(
+  userEmail: string
+) {
+  const history =
+    getAllLoginHistory();
+
+  saveJSON(
+    LOGIN_HISTORY_KEY,
+    history.filter(
+      (record) =>
+        record.userEmail !==
+        userEmail
+    )
+  );
+}
+
+export function getLoginStatistics(
+  userEmail: string
+) {
+  const history =
+    getLoginHistory(
+      userEmail
+    );
+
+  return {
+    total:
+      history.length,
+
+    successful:
+      history.filter(
+        (item) =>
+          item.success
+      ).length,
+
+    failed:
+      history.filter(
+        (item) =>
+          !item.success
+      ).length,
+
+    otpRequired:
+      history.filter(
+        (item) =>
+          item.event ===
+          "otp_required"
+      ).length,
+
+    otpFailed:
+      history.filter(
+        (item) =>
+          item.event ===
+          "otp_failed"
+      ).length,
+
+    trusted:
+      history.filter(
+        (item) =>
+          item.event ===
+          "otp_success"
+      ).length,
+  };
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\storage.ts
+==============================
+const HISTORY_KEY = "youtube_history";
+const WATCH_LATER_KEY = "youtube_watch_later";
+const LIKED_KEY = "youtube_liked";
+
+function getIds(key: string): number[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const data = localStorage.getItem(key);
+
+    if (!data) {
+      return [];
+    }
+
+    const parsed = JSON.parse(data);
+
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveIds(key: string, ids: number[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  localStorage.setItem(key, JSON.stringify(ids));
+}
+
+/* =========================
+   HISTORY
+========================= */
+
+export function getHistory(): number[] {
+  return getIds(HISTORY_KEY);
+}
+
+export function addToHistory(id: number) {
+  const history = getHistory().filter((item) => item !== id);
+
+  history.unshift(id);
+
+  saveIds(HISTORY_KEY, history.slice(0, 50));
+}
+
+export function clearHistory() {
+  saveIds(HISTORY_KEY, []);
+}
+
+/* =========================
+   WATCH LATER
+========================= */
+
+export function getWatchLater(): number[] {
+  return getIds(WATCH_LATER_KEY);
+}
+
+export function toggleWatchLater(id: number): boolean {
+  const items = getWatchLater();
+
+  if (items.includes(id)) {
+    saveIds(
+      WATCH_LATER_KEY,
+      items.filter((item) => item !== id)
+    );
+
+    return false;
+  }
+
+  saveIds(WATCH_LATER_KEY, [id, ...items]);
+
+  return true;
+}
+
+/* =========================
+   LIKED VIDEOS
+========================= */
+
+export function getLikedVideos(): number[] {
+  return getIds(LIKED_KEY);
+}
+
+export function toggleLikedVideo(id: number): boolean {
+  const items = getLikedVideos();
+
+  if (items.includes(id)) {
+    saveIds(
+      LIKED_KEY,
+      items.filter((item) => item !== id)
+    );
+
+    return false;
+  }
+
+  saveIds(LIKED_KEY, [id, ...items]);
+
+  return true;
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\subscriptionStorage.ts
+==============================
+export type SubscriptionPlan =
+  | "Free"
+  | "Bronze"
+  | "Silver"
+  | "Gold";
+
+export type SubscriptionStatus =
+  | "active"
+  | "expired"
+  | "cancelled";
+
+export type Subscription = {
+  plan: SubscriptionPlan;
+  status: SubscriptionStatus;
+  startedAt: string;
+  expiresAt: string | null;
+  autoRenew: boolean;
+  paymentId: string | null;
+  orderId: string | null;
+};
+
+const MEMBERSHIP_KEY =
+  "youtube_membership_subscription";
+
+const CHANNEL_SUBSCRIPTIONS_KEY =
+  "youtube_channel_subscriptions";
+
+const PLAN_DETAILS: Record<
+  SubscriptionPlan,
+  {
+    name: SubscriptionPlan;
+    price: number;
+    durationDays: number;
+    downloadLimit: number;
+    features: string[];
+  }
+> = {
+  Free: {
+    name: "Free",
+    price: 0,
+    durationDays: 0,
+    downloadLimit: 1,
+    features: [
+      "Basic video access",
+      "1 download per day",
+      "Standard features",
+    ],
+  },
+
+  Bronze: {
+    name: "Bronze",
+    price: 99,
+    durationDays: 30,
+    downloadLimit: 5,
+    features: [
+      "Unlimited video watching",
+      "5 downloads per day",
+      "Bronze membership",
+    ],
+  },
+
+  Silver: {
+    name: "Silver",
+    price: 199,
+    durationDays: 30,
+    downloadLimit: 10,
+    features: [
+      "Unlimited video watching",
+      "10 downloads per day",
+      "Silver membership",
+      "Priority features",
+    ],
+  },
+
+  Gold: {
+    name: "Gold",
+    price: 299,
+    durationDays: 30,
+    downloadLimit: 20,
+    features: [
+      "Unlimited video watching",
+      "20 downloads per day",
+      "Gold membership",
+      "All premium features",
+    ],
+  },
+};
+
+/* =========================================
+   MEMBERSHIP STORAGE
+========================================= */
+
+function getStoredMembership():
+  | Subscription
+  | null {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return null;
+  }
+
+  try {
+    const data =
+      localStorage.getItem(
+        MEMBERSHIP_KEY
+      );
+
+    if (!data) {
+      return null;
+    }
+
+    const parsed =
+      JSON.parse(data);
+
+    if (
+      !parsed ||
+      typeof parsed !==
+        "object"
+    ) {
+      return null;
+    }
+
+    return parsed as Subscription;
+  } catch (error) {
+    console.error(
+      "Failed to load membership:",
+      error
+    );
+
+    return null;
+  }
+}
+
+function saveMembership(
+  subscription: Subscription
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      MEMBERSHIP_KEY,
+      JSON.stringify(
+        subscription
+      )
+    );
+  } catch (error) {
+    console.error(
+      "Failed to save membership:",
+      error
+    );
+  }
+}
+
+/* =========================================
+   PLAN DETAILS
+========================================= */
+
+export function getPlanDetails(
+  plan: SubscriptionPlan
+) {
+  return PLAN_DETAILS[
+    plan
+  ];
+}
+
+export function getAllPlans() {
+  return Object.values(
+    PLAN_DETAILS
+  );
+}
+
+/* =========================================
+   CURRENT MEMBERSHIP
+========================================= */
+
+export function getCurrentSubscription(): Subscription {
+  const stored =
+    getStoredMembership();
+
+  if (!stored) {
+    return {
+      plan: "Free",
+      status: "active",
+      startedAt:
+        new Date().toISOString(),
+      expiresAt: null,
+      autoRenew: false,
+      paymentId: null,
+      orderId: null,
+    };
+  }
+
+  /*
+   * Automatically downgrade an expired
+   * paid subscription to Free.
+   */
+  if (
+    stored.plan !== "Free" &&
+    stored.expiresAt &&
+    new Date(
+      stored.expiresAt
+    ).getTime() <= Date.now()
+  ) {
+    const expiredSubscription: Subscription =
+      {
+        ...stored,
+        plan: "Free",
+        status: "expired",
+        autoRenew: false,
+      };
+
+    saveMembership(
+      expiredSubscription
+    );
+
+    return expiredSubscription;
+  }
+
+  return stored;
+}
+
+/* =========================================
+   EFFECTIVE SUBSCRIPTION
+========================================= */
+
+/*
+ * Returns true when the current subscription
+ * can use paid features.
+ *
+ * Free users are always allowed to use
+ * Free-level features.
+ */
+export function canUsePaidFeatures() {
+  const subscription =
+    getCurrentSubscription();
+
+  if (
+    subscription.plan ===
+    "Free"
+  ) {
+    return true;
+  }
+
+  if (
+    subscription.status !==
+      "active" &&
+    subscription.status !==
+      "cancelled"
+  ) {
+    return false;
+  }
+
+  if (
+    !subscription.expiresAt
+  ) {
+    return false;
+  }
+
+  return (
+    new Date(
+      subscription.expiresAt
+    ).getTime() >
+    Date.now()
+  );
+}
+
+/*
+ * Returns the plan the application should
+ * actually use for permissions and quotas.
+ *
+ * Example:
+ *
+ * Bronze + valid expiry
+ * => Bronze
+ *
+ * Bronze + expired
+ * => Free
+ */
+export function getEffectivePlan(): SubscriptionPlan {
+  const subscription =
+    getCurrentSubscription();
+
+  if (
+    subscription.plan ===
+    "Free"
+  ) {
+    return "Free";
+  }
+
+  if (
+    !canUsePaidFeatures()
+  ) {
+    return "Free";
+  }
+
+  return subscription.plan;
+}
+
+export function getCurrentPlan(): SubscriptionPlan {
+  return getEffectivePlan();
+}
+
+/*
+ * Compatibility export for
+ * older download code.
+ */
+export function getSubscriptionPlan(): SubscriptionPlan {
+  return getCurrentPlan();
+}
+
+export function isSubscriptionActive() {
+  const subscription =
+    getCurrentSubscription();
+
+  if (
+    subscription.plan ===
+    "Free"
+  ) {
+    return true;
+  }
+
+  return (
+    subscription.status ===
+      "active" &&
+    !!subscription.expiresAt &&
+    new Date(
+      subscription.expiresAt
+    ).getTime() >
+      Date.now()
+  );
+}
+
+/*
+ * Returns whether the current user has
+ * a valid paid membership.
+ */
+export function hasActivePaidSubscription() {
+  const subscription =
+    getCurrentSubscription();
+
+  if (
+    subscription.plan ===
+    "Free"
+  ) {
+    return false;
+  }
+
+  return (
+    subscription.status ===
+      "active" &&
+    !!subscription.expiresAt &&
+    new Date(
+      subscription.expiresAt
+    ).getTime() >
+      Date.now()
+  );
+}
+
+export function getSubscriptionDaysRemaining() {
+  const subscription =
+    getCurrentSubscription();
+
+  if (
+    !subscription.expiresAt
+  ) {
+    return null;
+  }
+
+  const remaining =
+    new Date(
+      subscription.expiresAt
+    ).getTime() -
+    Date.now();
+
+  return Math.max(
+    0,
+    Math.ceil(
+      remaining /
+        (24 *
+          60 *
+          60 *
+          1000)
+    )
+  );
+}
+
+export function getSubscriptionExpiryDate() {
+  return getCurrentSubscription()
+    .expiresAt;
+}
+
+export function getSubscriptionStatus(): SubscriptionStatus {
+  return getCurrentSubscription()
+    .status;
+}
+
+/* =========================================
+   MEMBERSHIP ACTIONS
+========================================= */
+
+export function subscribeToPlan(
+  plan: SubscriptionPlan,
+  paymentId: string | null = null,
+  orderId: string | null = null
+) {
+  if (
+    plan === "Free"
+  ) {
+    const freeSubscription: Subscription =
+      {
+        plan: "Free",
+        status: "active",
+        startedAt:
+          new Date().toISOString(),
+        expiresAt: null,
+        autoRenew: false,
+        paymentId: null,
+        orderId: null,
+      };
+
+    saveMembership(
+      freeSubscription
+    );
+
+    return freeSubscription;
+  }
+
+  const startedAt =
+    new Date();
+
+  const expiresAt =
+    new Date(
+      startedAt.getTime() +
+        PLAN_DETAILS[
+          plan
+        ].durationDays *
+          24 *
+          60 *
+          60 *
+          1000
+    );
+
+  const subscription: Subscription =
+    {
+      plan,
+      status: "active",
+      startedAt:
+        startedAt.toISOString(),
+      expiresAt:
+        expiresAt.toISOString(),
+      autoRenew: true,
+      paymentId,
+      orderId,
+    };
+
+  saveMembership(
+    subscription
+  );
+
+  return subscription;
+}
+
+export function cancelSubscription() {
+  const current =
+    getCurrentSubscription();
+
+  const updated: Subscription =
+    {
+      ...current,
+      autoRenew: false,
+      status:
+        current.plan ===
+        "Free"
+          ? "active"
+          : "cancelled",
+    };
+
+  saveMembership(
+    updated
+  );
+
+  return updated;
+}
+
+export function renewSubscription(
+  paymentId: string | null = null,
+  orderId: string | null = null
+) {
+  const current =
+    getCurrentSubscription();
+
+  if (
+    current.plan ===
+    "Free"
+  ) {
+    return current;
+  }
+
+  return subscribeToPlan(
+    current.plan,
+    paymentId,
+    orderId
+  );
+}
+
+export function setSubscriptionPayment(
+  paymentId: string,
+  orderId: string
+) {
+  const current =
+    getCurrentSubscription();
+
+  const updated: Subscription =
+    {
+      ...current,
+      paymentId,
+      orderId,
+    };
+
+  saveMembership(
+    updated
+  );
+
+  return updated;
+}
+
+export function getDownloadLimit(
+  plan?: SubscriptionPlan
+) {
+  const currentPlan =
+    plan ||
+    getCurrentPlan();
+
+  return PLAN_DETAILS[
+    currentPlan
+  ].downloadLimit;
+}
+
+/* =========================================
+   CHANNEL SUBSCRIPTIONS
+========================================= */
+
+function getChannelSubscriptions(): string[] {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return [];
+  }
+
+  try {
+    const data =
+      localStorage.getItem(
+        CHANNEL_SUBSCRIPTIONS_KEY
+      );
+
+    if (!data) {
+      return [];
+    }
+
+    const parsed =
+      JSON.parse(data);
+
+    if (
+      !Array.isArray(parsed)
+    ) {
+      return [];
+    }
+
+    return parsed.filter(
+      (
+        channel
+      ): channel is string =>
+        typeof channel ===
+          "string" &&
+        channel.trim()
+          .length > 0
+    );
+  } catch (error) {
+    console.error(
+      "Failed to load channel subscriptions:",
+      error
+    );
+
+    return [];
+  }
+}
+
+function saveChannelSubscriptions(
+  channels: string[]
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      CHANNEL_SUBSCRIPTIONS_KEY,
+      JSON.stringify(
+        channels
+      )
+    );
+  } catch (error) {
+    console.error(
+      "Failed to save channel subscriptions:",
+      error
+    );
+  }
+}
+
+/*
+ * Returns all subscribed
+ * channel names.
+ */
+export function getSubscriptions(): string[] {
+  return getChannelSubscriptions();
+}
+
+/*
+ * Alias for clearer naming.
+ */
+export function getSubscribedChannels(): string[] {
+  return getChannelSubscriptions();
+}
+
+/*
+ * Check whether a channel
+ * is subscribed.
+ */
+export function isSubscribed(
+  channelName: string
+) {
+  if (
+    !channelName
+  ) {
+    return false;
+  }
+
+  return getChannelSubscriptions().includes(
+    channelName
+  );
+}
+
+/*
+ * Subscribe / unsubscribe.
+ *
+ * Returns:
+ * true  = subscribed
+ * false = unsubscribed
+ */
+export function toggleSubscription(
+  channelName: string
+) {
+  if (
+    !channelName
+  ) {
+    return false;
+  }
+
+  const channels =
+    getChannelSubscriptions();
+
+  const exists =
+    channels.includes(
+      channelName
+    );
+
+  if (exists) {
+    const updated =
+      channels.filter(
+        (channel) =>
+          channel !==
+          channelName
+      );
+
+    saveChannelSubscriptions(
+      updated
+    );
+
+    return false;
+  }
+
+  saveChannelSubscriptions([
+    ...channels,
+    channelName,
+  ]);
+
+  return true;
+}
+
+/*
+ * Subscribe directly.
+ */
+export function subscribeToChannel(
+  channelName: string
+) {
+  if (
+    !channelName
+  ) {
+    return false;
+  }
+
+  const channels =
+    getChannelSubscriptions();
+
+  if (
+    channels.includes(
+      channelName
+    )
+  ) {
+    return true;
+  }
+
+  saveChannelSubscriptions([
+    ...channels,
+    channelName,
+  ]);
+
+  return true;
+}
+
+/*
+ * Unsubscribe directly.
+ */
+export function unsubscribeFromChannel(
+  channelName: string
+) {
+  if (
+    !channelName
+  ) {
+    return false;
+  }
+
+  const channels =
+    getChannelSubscriptions();
+
+  saveChannelSubscriptions(
+    channels.filter(
+      (channel) =>
+        channel !==
+        channelName
+    )
+  );
+
+  return true;
+}
+
+export function getSubscribedChannelCount() {
+  return getChannelSubscriptions()
+    .length;
+}
+
+/* =========================================
+   RESET HELPERS
+========================================= */
+
+export function resetMembership() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  localStorage.removeItem(
+    MEMBERSHIP_KEY
+  );
+}
+
+export function resetChannelSubscriptions() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  localStorage.removeItem(
+    CHANNEL_SUBSCRIPTIONS_KEY
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\themeStorage.ts
+==============================
+export type ThemeMode =
+  | "light"
+  | "dark"
+  | "auto";
+
+export type ResolvedTheme =
+  | "light"
+  | "dark";
+
+const THEME_KEY =
+  "youtube_theme_mode";
+
+const LIGHT_START_HOUR = 6;
+const DARK_START_HOUR = 18;
+
+/* =========================================
+   GET SAVED THEME MODE
+========================================= */
+
+export function getThemeMode(): ThemeMode {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return "auto";
+  }
+
+  try {
+    const stored =
+      localStorage.getItem(
+        THEME_KEY
+      );
+
+    if (
+      stored === "light" ||
+      stored === "dark" ||
+      stored === "auto"
+    ) {
+      return stored;
+    }
+  } catch (error) {
+    console.error(
+      "Failed to read theme mode:",
+      error
+    );
+  }
+
+  return "auto";
+}
+
+/* =========================================
+   SAVE THEME MODE
+========================================= */
+
+export function setThemeMode(
+  mode: ThemeMode
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  try {
+    localStorage.setItem(
+      THEME_KEY,
+      mode
+    );
+  } catch (error) {
+    console.error(
+      "Failed to save theme mode:",
+      error
+    );
+  }
+
+  applyTheme(mode);
+}
+
+/* =========================================
+   GET AUTO THEME
+========================================= */
+
+export function getAutoTheme(): ResolvedTheme {
+  const hour =
+    new Date().getHours();
+
+  if (
+    hour >= LIGHT_START_HOUR &&
+    hour < DARK_START_HOUR
+  ) {
+    return "light";
+  }
+
+  return "dark";
+}
+
+/* =========================================
+   RESOLVE CURRENT THEME
+========================================= */
+
+export function resolveTheme(
+  mode: ThemeMode
+): ResolvedTheme {
+  if (
+    mode === "light"
+  ) {
+    return "light";
+  }
+
+  if (
+    mode === "dark"
+  ) {
+    return "dark";
+  }
+
+  return getAutoTheme();
+}
+
+/* =========================================
+   APPLY THEME TO DOCUMENT
+========================================= */
+
+export function applyTheme(
+  mode: ThemeMode
+) {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return;
+  }
+
+  const theme =
+    resolveTheme(mode);
+
+  const html =
+    document.documentElement;
+
+  html.classList.remove(
+    "theme-light",
+    "theme-dark"
+  );
+
+  html.classList.add(
+    theme === "dark"
+      ? "theme-dark"
+      : "theme-light"
+  );
+
+  html.setAttribute(
+    "data-theme",
+    theme
+  );
+
+  html.style.colorScheme =
+    theme;
+
+  /*
+   * Useful for components that
+   * need to react to a theme change.
+   */
+  window.dispatchEvent(
+    new CustomEvent(
+      "youtube-theme-updated",
+      {
+        detail: {
+          mode,
+          theme,
+        },
+      }
+    )
+  );
+}
+
+/* =========================================
+   INITIALIZE THEME
+========================================= */
+
+export function initializeTheme() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return "light";
+  }
+
+  const mode =
+    getThemeMode();
+
+  const theme =
+    resolveTheme(mode);
+
+  applyTheme(mode);
+
+  return theme;
+}
+
+/* =========================================
+   GET CURRENT RESOLVED THEME
+========================================= */
+
+export function getCurrentTheme(): ResolvedTheme {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return "light";
+  }
+
+  const mode =
+    getThemeMode();
+
+  return resolveTheme(mode);
+}
+
+/* =========================================
+   TOGGLE LIGHT / DARK
+========================================= */
+
+export function toggleTheme():
+  | "light"
+  | "dark" {
+  const current =
+    getCurrentTheme();
+
+  const next =
+    current === "light"
+      ? "dark"
+      : "light";
+
+  setThemeMode(next);
+
+  return next;
+}
+
+/* =========================================
+   RESET TO AUTO
+========================================= */
+
+export function resetToAutoTheme() {
+  setThemeMode("auto");
+
+  return getAutoTheme();
+}
+
+/* =========================================
+   REFRESH AUTO THEME
+========================================= */
+
+export function refreshAutoTheme() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return "light";
+  }
+
+  const mode =
+    getThemeMode();
+
+  if (
+    mode !== "auto"
+  ) {
+    return resolveTheme(
+      mode
+    );
+  }
+
+  applyTheme("auto");
+
+  return getAutoTheme();
+}
+
+/* =========================================
+   AUTO THEME WATCHER
+========================================= */
+
+export function startAutoThemeWatcher() {
+  if (
+    typeof window ===
+    "undefined"
+  ) {
+    return () => {};
+  }
+
+  const updateTheme =
+    () => {
+      const mode =
+        getThemeMode();
+
+      if (
+        mode === "auto"
+      ) {
+        applyTheme(
+          "auto"
+        );
+      }
+    };
+
+  updateTheme();
+
+  const intervalId =
+    window.setInterval(
+      updateTheme,
+      60 * 1000
+    );
+
+  return () => {
+    window.clearInterval(
+      intervalId
+    );
+  };
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\lib\uploadStorage.ts
+==============================
+export type UploadedVideo = {
+  id: number;
+  title: string;
+  description: string;
+  category: string;
+  visibility: string;
+  duration: string;
+  channel: string;
+  views: string;
+  time: string;
+  avatar: string;
+  videoBlob: Blob;
+  thumbnailBlob: Blob | null;
+};
+
+const DB_NAME = "youtube_clone_database";
+const STORE_NAME = "uploaded_videos";
+const DB_VERSION = 1;
+
+function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined") {
+      reject(new Error("IndexedDB is only available in the browser."));
+      return;
+    }
+
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, {
+          keyPath: "id",
+        });
+      }
+    };
+
+    request.onsuccess = () => {
+      resolve(request.result);
+    };
+
+    request.onerror = () => {
+      reject(request.error);
+    };
+  });
+}
+
+export async function saveUploadedVideo(
+  video: UploadedVideo
+): Promise<void> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+
+    store.put(video);
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+export async function getUploadedVideos(): Promise<
+  UploadedVideo[]
+> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      STORE_NAME,
+      "readonly"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      db.close();
+
+      const videos = request.result as UploadedVideo[];
+
+      videos.sort((a, b) => b.id - a.id);
+
+      resolve(videos);
+    };
+
+    request.onerror = () => {
+      db.close();
+      reject(request.error);
+    };
+  });
+}
+
+export async function deleteUploadedVideo(
+  id: number
+): Promise<void> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(
+      STORE_NAME,
+      "readwrite"
+    );
+
+    const store = transaction.objectStore(STORE_NAME);
+
+    store.delete(id);
+
+    transaction.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+
+    transaction.onerror = () => {
+      db.close();
+      reject(transaction.error);
+    };
+  });
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\pages\history.tsx
+==============================
+import { useEffect, useState } from "react";
+import { History as HistoryIcon, Trash2 } from "lucide-react";
+
+import Header from "@/components/Header";
+import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
+import VideoGrid from "@/components/VideoGrid";
+import { videos } from "@/data/videos";
+import {
+  clearHistory,
+  getHistory,
+} from "@/lib/storage";
+
+export default function HistoryPage() {
+  const [historyIds, setHistoryIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    setHistoryIds(getHistory());
+  }, []);
+
+  const historyVideos = historyIds
+    .map((id) =>
+      videos.find((video) => video.id === id)
+    )
+    .filter(
+      (video): video is (typeof videos)[number] =>
+        video !== undefined
+    );
+
+  const handleClearHistory = () => {
+    clearHistory();
+    setHistoryIds([]);
+  };
+
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <Header onMenuClick={() => {}} />
+
+      <Sidebar
+        isOpen={true}
+        onClose={() => {}}
+      />
+
+      <MobileNav />
+
+      <section className="pt-16 lg:ml-64">
+        <div className="p-4 pb-20 sm:p-5 md:p-6 lg:pb-8">
+          <div className="mb-8 flex items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-3">
+                <HistoryIcon size={28} />
+
+                <h1 className="text-2xl font-bold md:text-3xl">
+                  History
+                </h1>
+              </div>
+
+              <p className="mt-2 text-sm text-gray-500">
+                Videos you recently watched
+              </p>
+            </div>
+
+            {historyVideos.length > 0 && (
+              <button
+                type="button"
+                onClick={handleClearHistory}
+                className="flex items-center gap-2 rounded-full bg-gray-100 px-4 py-2 text-sm font-medium hover:bg-gray-200"
+              >
+                <Trash2 size={18} />
+                <span className="hidden sm:inline">
+                  Clear history
+                </span>
+              </button>
+            )}
+          </div>
+
+          <VideoGrid
+            videos={historyVideos}
+            emptyTitle="Your history is empty"
+            emptyMessage="Videos you watch will appear here."
+          />
+        </div>
+      </section>
+    </main>
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\pages\liked-videos.tsx
+==============================
+import { useEffect, useState } from "react";
+import { ThumbsUp } from "lucide-react";
+
+import Header from "@/components/Header";
+import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
+import VideoGrid from "@/components/VideoGrid";
+import { videos } from "@/data/videos";
+import { getLikedVideos } from "@/lib/storage";
+
+export default function LikedVideosPage() {
+  const [likedIds, setLikedIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    setLikedIds(getLikedVideos());
+  }, []);
+
+  const likedVideos = likedIds
+    .map((id) =>
+      videos.find((video) => video.id === id)
+    )
+    .filter(
+      (video): video is (typeof videos)[number] =>
+        video !== undefined
+    );
+
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <Header onMenuClick={() => {}} />
+
+      <Sidebar
+        isOpen={true}
+        onClose={() => {}}
+      />
+
+      <MobileNav />
+
+      <section className="pt-16 lg:ml-64">
+        <div className="p-4 pb-20 sm:p-5 md:p-6 lg:pb-8">
+          <div className="mb-8">
+            <div className="flex items-center gap-3">
+              <ThumbsUp size={28} />
+
+              <h1 className="text-2xl font-bold md:text-3xl">
+                Liked Videos
+              </h1>
+            </div>
+
+            <p className="mt-2 text-sm text-gray-500">
+              Videos you've liked
+            </p>
+          </div>
+
+          <VideoGrid
+            videos={likedVideos}
+            emptyTitle="No liked videos"
+            emptyMessage="Videos you like will appear here."
+          />
+        </div>
+      </section>
+    </main>
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\pages\playlists.tsx
+==============================
+import Link from "next/link";
+import Header from "@/components/Header";
+import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
+import { videos } from "@/data/videos";
+
+const playlists = [
+  {
+    id: 1,
+    title: "Watch Later",
+    count: 8,
+    description: "Videos you want to watch later",
+    videos: videos.slice(0, 4),
+  },
+  {
+    id: 2,
+    title: "Programming",
+    count: 6,
+    description: "Programming and development videos",
+    videos: videos.filter(
+      (video) =>
+        video.category === "Programming" ||
+        video.category === "React" ||
+        video.category === "JavaScript"
+    ).slice(0, 4),
+  },
+  {
+    id: 3,
+    title: "Favorites",
+    count: 5,
+    description: "Your favorite videos",
+    videos: videos.slice(4, 8),
+  },
+];
+
+export default function PlaylistsPage() {
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <Header onMenuClick={() => {}} />
+
+      <Sidebar isOpen={true} onClose={() => {}} />
+
+      <MobileNav />
+
+      <section className="pt-16 lg:ml-64">
+        <div className="p-4 pb-20 sm:p-5 md:p-6 lg:pb-8">
+          <div className="mb-8">
+            <h1 className="text-2xl font-bold md:text-3xl">
+              Playlists
+            </h1>
+
+            <p className="mt-1 text-sm text-gray-500">
+              Organize and manage your favorite videos
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+            {playlists.map((playlist) => (
+              <div
+                key={playlist.id}
+                className="overflow-hidden rounded-xl border border-gray-200 bg-white transition hover:shadow-lg"
+              >
+                <div className="grid grid-cols-2">
+                  {playlist.videos.slice(0, 4).map((video) => (
+                    <img
+                      key={video.id}
+                      src={video.thumbnail}
+                      alt={video.title}
+                      className="aspect-video h-full w-full object-cover"
+                    />
+                  ))}
+                </div>
+
+                <div className="p-4">
+                  <h2 className="text-lg font-bold">
+                    {playlist.title}
+                  </h2>
+
+                  <p className="mt-1 text-sm text-gray-500">
+                    {playlist.count} videos
+                  </p>
+
+                  <p className="mt-2 line-clamp-2 text-sm text-gray-600">
+                    {playlist.description}
+                  </p>
+
+                  <button
+                    type="button"
+                    className="mt-4 rounded-full bg-black px-4 py-2 text-sm font-medium text-white hover:bg-gray-800"
+                  >
+                    View playlist
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <section className="mt-12">
+            <h2 className="mb-5 text-xl font-bold">
+              Recent videos
+            </h2>
+
+            <div className="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {videos.slice(0, 8).map((video) => (
+                <Link
+                  key={video.id}
+                  href={`/watch/${video.id}`}
+                  className="group"
+                >
+                  <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
+                    <img
+                      src={video.thumbnail}
+                      alt={video.title}
+                      className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                    />
+
+                    <span className="absolute bottom-2 right-2 rounded bg-black px-1.5 py-0.5 text-xs text-white">
+                      {video.duration}
+                    </span>
+                  </div>
+
+                  <h3 className="mt-3 line-clamp-2 text-sm font-semibold">
+                    {video.title}
+                  </h3>
+
+                  <p className="mt-1 text-sm text-gray-500">
+                    {video.channel}
+                  </p>
+                </Link>
+              ))}
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\pages\report-history.tsx
+==============================
+import { useState } from "react";
+import {
+  Flag,
+  CheckCircle2,
+} from "lucide-react";
+
+import Header from "@/components/Header";
+import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
+
+type Report = {
+  id: number;
+  content: string;
+  reason: string;
+  date: string;
+  status: "Under review" | "Resolved";
+};
+
+export default function ReportHistoryPage() {
+  const [reports] = useState<Report[]>([
+    {
+      id: 1,
+      content: "Example video",
+      reason: "Inappropriate content",
+      date: "September 8, 2026",
+      status: "Under review",
+    },
+    {
+      id: 2,
+      content: "Example channel",
+      reason: "Spam",
+      date: "September 5, 2026",
+      status: "Resolved",
+    },
+  ]);
+
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <Header onMenuClick={() => {}} />
+
+      <Sidebar
+        isOpen={true}
+        onClose={() => {}}
+      />
+
+      <MobileNav />
+
+      <section className="pt-16 lg:ml-64">
+        <div className="mx-auto max-w-5xl px-4 pb-20 pt-6 sm:px-6 lg:pb-8">
+          <div className="mb-8">
+            <div className="flex items-center gap-3">
+              <Flag size={28} />
+
+              <h1 className="text-2xl font-bold md:text-3xl">
+                Report History
+              </h1>
+            </div>
+
+            <p className="mt-2 text-sm text-gray-500">
+              View your submitted reports and their status
+            </p>
+          </div>
+
+          {reports.length > 0 ? (
+            <div className="overflow-hidden rounded-xl border border-gray-200">
+              <div className="hidden grid-cols-[1.4fr_1.5fr_1fr_1fr] gap-4 border-b border-gray-200 bg-gray-50 px-5 py-4 text-sm font-semibold md:grid">
+                <span>Content</span>
+                <span>Reason</span>
+                <span>Date</span>
+                <span>Status</span>
+              </div>
+
+              {reports.map((report) => (
+                <div
+                  key={report.id}
+                  className="grid gap-3 border-b border-gray-200 px-5 py-4 last:border-b-0 md:grid-cols-[1.4fr_1.5fr_1fr_1fr] md:items-center md:gap-4"
+                >
+                  <div>
+                    <p className="text-sm font-semibold">
+                      {report.content}
+                    </p>
+
+                    <p className="mt-1 text-xs text-gray-500 md:hidden">
+                      {report.reason}
+                    </p>
+                  </div>
+
+                  <p className="hidden text-sm text-gray-600 md:block">
+                    {report.reason}
+                  </p>
+
+                  <p className="text-xs text-gray-500 md:text-sm">
+                    {report.date}
+                  </p>
+
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2
+                      size={16}
+                      className={
+                        report.status === "Resolved"
+                          ? "text-green-600"
+                          : "text-yellow-600"
+                      }
+                    />
+
+                    <span className="text-sm">
+                      {report.status}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="flex min-h-[350px] items-center justify-center text-center">
+              <div>
+                <Flag
+                  size={48}
+                  className="mx-auto text-gray-400"
+                />
+
+                <h2 className="mt-4 text-xl font-semibold">
+                  No reports
+                </h2>
+
+                <p className="mt-2 text-sm text-gray-500">
+                  Your submitted reports will appear here.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\pages\subscriptions.tsx
+==============================
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+
+import Header from "@/components/Header";
+import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
+import {
+  getSubscriptions,
+  toggleSubscription,
+} from "@/lib/subscriptionStorage";
+import { videos } from "@/data/videos";
+
+type ChannelInfo = {
+  name: string;
+  avatar: string;
+  videos: typeof videos;
+};
+
+export default function SubscriptionsPage() {
+  const [subscriptions, setSubscriptions] =
+    useState<string[]>([]);
+
+  useEffect(() => {
+    setSubscriptions(getSubscriptions());
+  }, []);
+
+  const subscribedChannels =
+    useMemo<ChannelInfo[]>(() => {
+      return subscriptions
+        .map((channelName) => {
+          const channelVideos =
+            videos.filter(
+              (video) =>
+                video.channel ===
+                channelName
+            );
+
+          const firstVideo =
+            channelVideos[0];
+
+          if (!firstVideo) {
+            return null;
+          }
+
+          return {
+            name: channelName,
+            avatar: firstVideo.avatar,
+            videos: channelVideos,
+          };
+        })
+        .filter(
+          (
+            channel
+          ): channel is ChannelInfo =>
+            channel !== null
+        );
+    }, [subscriptions]);
+
+  const latestVideos = useMemo(() => {
+    return videos
+      .filter((video) =>
+        subscriptions.includes(
+          video.channel
+        )
+      )
+      .sort((a, b) => b.id - a.id);
+  }, [subscriptions]);
+
+  const handleUnsubscribe = (
+    channel: string
+  ) => {
+    const newState =
+      toggleSubscription(channel);
+
+    if (!newState) {
+      setSubscriptions((prev) =>
+        prev.filter(
+          (item) => item !== channel
+        )
+      );
+    }
+  };
+
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <Header
+        onMenuClick={() => {}}
+      />
+
+      <Sidebar
+        isOpen={true}
+        onClose={() => {}}
+      />
+
+      <MobileNav />
+
+      <section className="pt-16 lg:ml-64">
+        <div className="p-4 pb-20 sm:p-5 md:p-6 lg:pb-8">
+          <div className="mb-8">
+            <h1 className="text-2xl font-bold md:text-3xl">
+              Subscriptions
+            </h1>
+
+            <p className="mt-1 text-sm text-gray-500">
+              Latest videos from channels you follow
+            </p>
+          </div>
+
+          {subscriptions.length > 0 ? (
+            <>
+              {/* Channels */}
+              <section className="mb-10">
+                <div className="mb-5 flex items-center justify-between">
+                  <h2 className="text-xl font-bold">
+                    Your channels
+                  </h2>
+                </div>
+
+                <div className="flex gap-6 overflow-x-auto pb-3">
+                  {subscribedChannels.map(
+                    (channel) => (
+                      <div
+                        key={channel.name}
+                        className="flex min-w-[140px] shrink-0 flex-col items-center text-center"
+                      >
+                        <img
+                          src={channel.avatar}
+                          alt={channel.name}
+                          className="h-20 w-20 rounded-full object-cover"
+                        />
+
+                        <h3 className="mt-3 line-clamp-1 text-sm font-semibold">
+                          {channel.name}
+                        </h3>
+
+                        <p className="mt-1 text-xs text-gray-500">
+                          {channel.videos.length}{" "}
+                          videos
+                        </p>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleUnsubscribe(
+                              channel.name
+                            )
+                          }
+                          className="mt-3 rounded-full bg-gray-200 px-4 py-2 text-xs font-semibold hover:bg-gray-300"
+                        >
+                          Subscribed
+                        </button>
+                      </div>
+                    )
+                  )}
+                </div>
+              </section>
+
+              {/* Latest Videos */}
+              <section>
+                <h2 className="mb-5 text-xl font-bold md:text-2xl">
+                  Latest videos
+                </h2>
+
+                {latestVideos.length > 0 ? (
+                  <div className="grid grid-cols-1 gap-x-4 gap-y-8 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                    {latestVideos.map(
+                      (video) => (
+                        <Link
+                          key={video.id}
+                          href={`/watch/${video.id}`}
+                          className="group min-w-0"
+                        >
+                          <div className="relative aspect-video overflow-hidden rounded-xl bg-gray-200">
+                            <img
+                              src={video.thumbnail}
+                              alt={video.title}
+                              loading="lazy"
+                              className="h-full w-full object-cover transition duration-300 group-hover:scale-105"
+                            />
+
+                            <span className="absolute bottom-2 right-2 rounded bg-black/90 px-1.5 py-0.5 text-xs text-white">
+                              {video.duration}
+                            </span>
+                          </div>
+
+                          <div className="mt-3 flex gap-3">
+                            <img
+                              src={video.avatar}
+                              alt={video.channel}
+                              loading="lazy"
+                              className="h-10 w-10 shrink-0 rounded-full object-cover"
+                            />
+
+                            <div className="min-w-0">
+                              <h3 className="line-clamp-2 text-sm font-semibold">
+                                {video.title}
+                              </h3>
+
+                              <p className="mt-1 text-sm text-gray-600">
+                                {video.channel}
+                              </p>
+
+                              <p className="text-sm text-gray-500">
+                                {video.views} â€¢{" "}
+                                {video.time}
+                              </p>
+                            </div>
+                          </div>
+                        </Link>
+                      )
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex min-h-[350px] items-center justify-center text-center">
+                    <div>
+                      <h2 className="text-xl font-semibold">
+                        No new videos
+                      </h2>
+
+                      <p className="mt-2 text-sm text-gray-500">
+                        Your subscribed channels
+                        haven't uploaded anything yet.
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </>
+          ) : (
+            <div className="flex min-h-[450px] items-center justify-center text-center">
+              <div>
+                <h2 className="text-2xl font-bold">
+                  No subscriptions yet
+                </h2>
+
+                <p className="mx-auto mt-2 max-w-md text-sm text-gray-500">
+                  Open a video and click Subscribe to
+                  start building your subscriptions.
+                </p>
+
+                <Link
+                  href="/"
+                  className="mt-5 inline-flex rounded-full bg-black px-5 py-2.5 text-sm font-semibold text-white hover:bg-gray-800"
+                >
+                  Explore videos
+                </Link>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+
+==============================
+FILE: D:\YOUTUBE\youtube-next\src\pages\watch-later.tsx
+==============================
+import { useEffect, useState } from "react";
+import { Clock3 } from "lucide-react";
+
+import Header from "@/components/Header";
+import Sidebar from "@/components/Sidebar";
+import MobileNav from "@/components/MobileNav";
+import VideoGrid from "@/components/VideoGrid";
+import { videos } from "@/data/videos";
+import { getWatchLater } from "@/lib/storage";
+
+export default function WatchLaterPage() {
+  const [savedIds, setSavedIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    setSavedIds(getWatchLater());
+  }, []);
+
+  const savedVideos = savedIds
+    .map((id) =>
+      videos.find((video) => video.id === id)
+    )
+    .filter(
+      (video): video is (typeof videos)[number] =>
+        video !== undefined
+    );
+
+  return (
+    <main className="min-h-screen bg-white text-black">
+      <Header onMenuClick={() => {}} />
+
+      <Sidebar
+        isOpen={true}
+        onClose={() => {}}
+      />
+
+      <MobileNav />
+
+      <section className="pt-16 lg:ml-64">
+        <div className="p-4 pb-20 sm:p-5 md:p-6 lg:pb-8">
+          <div className="mb-8">
+            <div className="flex items-center gap-3">
+              <Clock3 size={28} />
+
+              <h1 className="text-2xl font-bold md:text-3xl">
+                Watch Later
+              </h1>
+            </div>
+
+            <p className="mt-2 text-sm text-gray-500">
+              Videos you've saved to watch later
+            </p>
+          </div>
+
+          <VideoGrid
+            videos={savedVideos}
+            emptyTitle="Nothing saved yet"
+            emptyMessage="Save videos and watch them later."
+          />
+        </div>
+      </section>
+    </main>
+  );
+}

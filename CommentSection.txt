@@ -1,0 +1,2383 @@
+import {
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+import {
+  MessageCircle,
+  Send,
+  ThumbsDown,
+  ThumbsUp,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
+  CornerUpLeft,
+  Flag,
+  Languages,
+  Check,
+  Loader2,
+  X,
+} from "lucide-react";
+
+import { getCurrentUser } from "@/lib/auth";
+
+import {
+  canEditComment,
+  type VideoComment,
+  type CommentReportReason,
+} from "@/lib/commentStorage";
+
+import {
+  checkRateLimit,
+  isDuplicateComment,
+  requiresCaptcha,
+  recordCommentPost,
+  validateCommentText,
+} from "@/lib/commentModeration";
+
+import {
+  fetchComments,
+  createBackendComment,
+  updateBackendComment,
+  deleteBackendComment,
+  reactToBackendComment,
+  reportBackendComment,
+  type BackendComment,
+} from "@/lib/commentApi";
+
+type CommentSectionProps = {
+  videoId: string;
+};
+
+type SortOption =
+  | "newest"
+  | "oldest"
+  | "liked"
+  | "relevant";
+
+type CaptchaData = {
+  first: number;
+  second: number;
+};
+
+const languages = [
+  "English",
+  "Hindi",
+  "Spanish",
+  "French",
+  "German",
+];
+
+const reportReasons: {
+  label: string;
+  value: CommentReportReason;
+}[] = [
+  {
+    label: "Spam",
+    value: "spam",
+  },
+  {
+    label: "Harassment",
+    value: "harassment",
+  },
+  {
+    label: "Offensive content",
+    value: "offensive",
+  },
+];
+
+const CAPTCHA_VALIDITY = 5 * 60 * 1000;
+
+function createCaptchaData(): CaptchaData {
+  return {
+    first:
+      Math.floor(Math.random() * 9) + 1,
+    second:
+      Math.floor(Math.random() * 9) + 1,
+  };
+}
+
+function mapBackendCommentToFrontend(
+  comment: BackendComment
+): VideoComment {
+  const user =
+    typeof comment.userId === "object"
+      ? comment.userId
+      : undefined;
+
+  return {
+    id: comment._id,
+    videoId: comment.videoId as unknown as number,
+
+    user: {
+      username:
+        comment.username ||
+        user?.email?.split("@")[0] ||
+        "user",
+
+      displayName:
+        comment.displayName ||
+        user?.name ||
+        "User",
+
+      avatar:
+        comment.avatar ||
+        user?.avatar ||
+        "",
+
+      location:
+        comment.location ||
+        user?.location ||
+        "India",
+
+      email:
+        user?.email || "",
+    },
+
+    text: comment.text,
+
+    language:
+      comment.language || "English",
+
+    createdAt:
+      comment.createdAt,
+
+    updatedAt:
+      comment.updatedAt,
+
+    edited:
+      Boolean(comment.edited),
+
+    likes:
+      Number(comment.likes || 0),
+
+    dislikes:
+      Number(comment.dislikes || 0),
+
+    likedByCurrentUser:
+      false,
+
+    dislikedByCurrentUser:
+      false,
+
+    likedBy:
+      comment.likedBy || [],
+
+    dislikedBy:
+      comment.dislikedBy || [],
+
+    parentId:
+      comment.parentId,
+
+    replyCount:
+      Number(comment.replyCount || 0),
+
+    reported:
+      Boolean(comment.reported),
+
+    reportReasons: (comment.reportReasons || []).filter(
+  (reason): reason is CommentReportReason =>
+    reason === "spam" ||
+    reason === "harassment" ||
+    reason === "offensive"
+),
+  };
+}
+
+export default function CommentSection({
+  videoId,
+}: CommentSectionProps) {
+  const [comments, setComments] =
+    useState<VideoComment[]>([]);
+
+  const [commentText, setCommentText] =
+    useState("");
+
+  const [commentLanguage, setCommentLanguage] =
+    useState("English");
+
+  const [replyingTo, setReplyingTo] =
+    useState<string | null>(null);
+
+  const [replyText, setReplyText] =
+    useState("");
+
+  const [editingId, setEditingId] =
+    useState<string | null>(null);
+
+  const [editText, setEditText] =
+    useState("");
+
+  const [sortOption, setSortOption] =
+    useState<SortOption>("newest");
+
+  const [error, setError] =
+    useState("");
+
+  const [success, setSuccess] =
+    useState("");
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [actionLoading, setActionLoading] =
+    useState<string | null>(null);
+
+  const [reportingId, setReportingId] =
+    useState<string | null>(null);
+
+    const [openCommentMenuId, setOpenCommentMenuId] =
+    useState<string | null>(null);
+
+  const [translatedComments, setTranslatedComments] =
+    useState<Record<string, string>>({});
+
+  const [translatingId, setTranslatingId] =
+    useState<string | null>(null);
+
+  const [targetLanguage, setTargetLanguage] =
+    useState("Hindi");
+
+  const [captchaOpen, setCaptchaOpen] =
+    useState(false);
+
+  const [captchaFor, setCaptchaFor] =
+    useState<"comment" | "reply">("comment");
+
+  const [captcha, setCaptcha] =
+    useState<CaptchaData>(
+      createCaptchaData()
+    );
+
+  const [captchaAnswer, setCaptchaAnswer] =
+    useState("");
+
+  const [
+    captchaVerifiedUntil,
+    setCaptchaVerifiedUntil,
+  ] = useState(0);
+
+  const currentUser =
+    getCurrentUser();
+
+  const clearMessages = () => {
+    setError("");
+    setSuccess("");
+  };
+
+  /*
+   * ============================
+   * LOAD COMMENTS FROM MONGODB
+   * ============================
+   */
+
+  const loadComments = async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const backendComments =
+        await fetchComments(videoId);
+
+      const mappedComments =
+        backendComments.map(
+          mapBackendCommentToFrontend
+        );
+
+      setComments(mappedComments);
+    } catch (error) {
+      console.error(
+        "Load comments error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load comments."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!videoId) {
+      setComments([]);
+      setLoading(false);
+      return;
+    }
+
+    loadComments();
+  }, [videoId]);
+
+  /*
+   * ============================
+   * USER HELPERS
+   * ============================
+   */
+
+  const getCurrentUsername = () => {
+    if (!currentUser) {
+      return "guest";
+    }
+
+    return currentUser.email
+      .split("@")[0]
+      .toLowerCase()
+      .replace(
+        /[^a-z0-9_]/g,
+        ""
+      );
+  };
+
+  const requireLogin = () => {
+    if (currentUser) {
+      return true;
+    }
+
+    if (
+      typeof window !== "undefined"
+    ) {
+      const returnUrl =
+        `${window.location.pathname}${window.location.search}`;
+
+      window.location.href =
+        `/login?returnUrl=${encodeURIComponent(
+          returnUrl
+        )}`;
+    }
+
+    return false;
+  };
+
+  const clearError = () => {
+    setError("");
+  };
+
+  /*
+   * ============================
+   * SORTING
+   * ============================
+   */
+
+  const rootComments =
+    useMemo(() => {
+      const roots =
+        comments.filter(
+          (comment) =>
+            comment &&
+            comment.parentId === null
+        );
+
+      const sorted = [...roots];
+
+      if (
+        sortOption === "newest"
+      ) {
+        sorted.sort(
+          (a, b) =>
+            new Date(
+              b.createdAt
+            ).getTime() -
+            new Date(
+              a.createdAt
+            ).getTime()
+        );
+      }
+
+      if (
+        sortOption === "oldest"
+      ) {
+        sorted.sort(
+          (a, b) =>
+            new Date(
+              a.createdAt
+            ).getTime() -
+            new Date(
+              b.createdAt
+            ).getTime()
+        );
+      }
+
+      if (
+        sortOption === "liked"
+      ) {
+        sorted.sort(
+          (a, b) =>
+            b.likes - a.likes
+        );
+      }
+
+      if (
+        sortOption === "relevant"
+      ) {
+        sorted.sort(
+          (a, b) => {
+            const aScore =
+              a.likes * 3 +
+              a.replyCount * 2;
+
+            const bScore =
+              b.likes * 3 +
+              b.replyCount * 2;
+
+            return (
+              bScore - aScore
+            );
+          }
+        );
+      }
+
+      return sorted;
+    }, [
+      comments,
+      sortOption,
+    ]);
+
+  const getReplies = (
+    parentId: string
+  ) => {
+    return comments
+      .filter(
+        (comment) =>
+          comment.parentId ===
+          parentId
+      )
+      .sort(
+        (a, b) =>
+          new Date(
+            a.createdAt
+          ).getTime() -
+          new Date(
+            b.createdAt
+          ).getTime()
+      );
+  };
+
+  /*
+   * ============================
+   * CAPTCHA
+   * ============================
+   */
+
+  const createNewCaptcha = () => {
+    setCaptcha(
+      createCaptchaData()
+    );
+
+    setCaptchaAnswer("");
+  };
+
+  const openCaptcha = (
+    type: "comment" | "reply"
+  ) => {
+    setCaptchaFor(type);
+    createNewCaptcha();
+    setCaptchaOpen(true);
+    clearMessages();
+  };
+
+  const verifyCaptcha = () => {
+    const expected =
+      captcha.first +
+      captcha.second;
+
+    const answer =
+      Number(captchaAnswer);
+
+    if (
+      answer !== expected
+    ) {
+      setError(
+        "Incorrect CAPTCHA answer."
+      );
+
+      createNewCaptcha();
+
+      return false;
+    }
+
+    setCaptchaOpen(false);
+    setCaptchaAnswer("");
+    setError("");
+
+    setCaptchaVerifiedUntil(
+      Date.now() +
+        CAPTCHA_VALIDITY
+    );
+
+    return true;
+  };
+
+  const shouldRequireCaptcha =
+    () => {
+      if (
+        Date.now() <
+        captchaVerifiedUntil
+      ) {
+        return false;
+      }
+
+      return requiresCaptcha();
+    };
+
+  /*
+   * ============================
+   * VALIDATION
+   * ============================
+   */
+
+  const validatePost = (
+    text: string
+  ) => {
+    clearMessages();
+
+    if (!currentUser) {
+      setError(
+        "Please sign in before posting a comment."
+      );
+
+      return false;
+    }
+
+    const validation =
+      validateCommentText(text);
+
+    if (!validation.valid) {
+      setError(
+        validation.reason
+      );
+
+      return false;
+    }
+
+    const rate =
+      checkRateLimit();
+
+    if (!rate.allowed) {
+      setError(
+        "You are posting too quickly. Please wait before posting another comment."
+      );
+
+      return false;
+    }
+
+    const currentActor =
+      currentUser.email;
+
+    const existingTexts =
+      comments
+        .filter(
+          (comment) =>
+            comment.user.email ===
+            currentActor
+        )
+        .map(
+          (comment) =>
+            comment.text
+        );
+
+    if (
+      isDuplicateComment(
+        text,
+        existingTexts
+      )
+    ) {
+      setError(
+        "You already posted a similar comment."
+      );
+
+      return false;
+    }
+
+    return true;
+  };
+
+  /*
+   * ============================
+   * CREATE COMMENT
+   * ============================
+   */
+
+  const saveNewComment = async (
+    text: string,
+    parentId:
+      | string
+      | null,
+    language: string
+  ) => {
+    try {
+      setActionLoading(
+        parentId
+          ? `reply-${parentId}`
+          : "new-comment"
+      );
+
+      const created =
+        await createBackendComment(
+          videoId,
+          text,
+          language,
+          parentId
+        );
+
+      recordCommentPost();
+
+      const mapped =
+        mapBackendCommentToFrontend(
+          created
+        );
+
+      setComments(
+        (previous) => [
+          ...previous,
+          mapped,
+        ]
+      );
+
+      return true;
+    } catch (error) {
+      console.error(
+        "Create comment error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to save comment."
+      );
+
+      return false;
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleAddComment = async () => {
+    if (!requireLogin()) {
+      return;
+    }
+
+    const text =
+      commentText.trim();
+
+    if (!validatePost(text)) {
+      return;
+    }
+
+    if (
+      shouldRequireCaptcha() &&
+      !captchaOpen
+    ) {
+      openCaptcha("comment");
+      return;
+    }
+
+    if (
+      captchaOpen &&
+      captchaFor === "comment"
+    ) {
+      if (!verifyCaptcha()) {
+        return;
+      }
+    }
+
+    const saved =
+      await saveNewComment(
+        text,
+        null,
+        commentLanguage
+      );
+
+    if (!saved) {
+      return;
+    }
+
+    setCommentText("");
+
+    setSuccess(
+      "Comment posted successfully."
+    );
+  };
+
+  /*
+   * ============================
+   * REPLY
+   * ============================
+   */
+
+  const handleReply = async (
+    parentComment: VideoComment
+  ) => {
+    if (!requireLogin()) {
+      return;
+    }
+
+    const text =
+      replyText.trim();
+
+    if (!validatePost(text)) {
+      return;
+    }
+
+    if (
+      shouldRequireCaptcha() &&
+      !captchaOpen
+    ) {
+      openCaptcha("reply");
+      return;
+    }
+
+    if (
+      captchaOpen &&
+      captchaFor === "reply"
+    ) {
+      if (!verifyCaptcha()) {
+        return;
+      }
+    }
+
+    const saved =
+      await saveNewComment(
+        text,
+        parentComment.id,
+        commentLanguage
+      );
+
+    if (!saved) {
+      return;
+    }
+
+    setReplyText("");
+    setReplyingTo(null);
+
+    setSuccess(
+      "Reply posted successfully."
+    );
+  };
+
+  const handleCaptchaSubmit =
+    async () => {
+      if (!captchaOpen) {
+        return;
+      }
+
+      if (!verifyCaptcha()) {
+        return;
+      }
+
+      if (
+        captchaFor === "comment"
+      ) {
+        await handleAddComment();
+        return;
+      }
+
+      if (
+        captchaFor === "reply" &&
+        replyingTo
+      ) {
+        const parent =
+          comments.find(
+            (comment) =>
+              comment.id ===
+              replyingTo
+          );
+
+        if (parent) {
+          await handleReply(
+            parent
+          );
+        }
+      }
+    };
+
+  /*
+   * ============================
+   * OWN COMMENT
+   * ============================
+   */
+
+  const isOwnComment = (
+    comment: VideoComment
+  ) => {
+    if (!currentUser) {
+      return false;
+    }
+
+    /*
+     * Backend comments are created
+     * using the authenticated JWT user.
+     *
+     * The frontend compares email
+     * with the currently logged-in user.
+     */
+
+    return (
+      comment.user.email ===
+      currentUser.email
+    );
+  };
+
+  /*
+   * ============================
+   * EDIT
+   * ============================
+   */
+
+  const startEditing = (
+    comment: VideoComment
+  ) => {
+    if (!isOwnComment(comment)) {
+      setError(
+        "You can only edit your own comment."
+      );
+
+      return;
+    }
+
+    if (!canEditComment(comment)) {
+      setError(
+        "The edit time limit for this comment has expired."
+      );
+
+      return;
+    }
+
+    setEditingId(
+      comment.id
+    );
+
+    setEditText(
+      comment.text
+    );
+
+    setReplyingTo(null);
+
+    clearMessages();
+  };
+
+  const cancelEditing = () => {
+    setEditingId(null);
+    setEditText("");
+  };
+
+  const handleEdit = async (
+    comment: VideoComment
+  ) => {
+    if (!isOwnComment(comment)) {
+      setError(
+        "You can only edit your own comment."
+      );
+
+      return;
+    }
+
+    const text =
+      editText.trim();
+
+    if (!text) {
+      setError(
+        "Comment cannot be empty."
+      );
+
+      return;
+    }
+
+    const validation =
+      validateCommentText(text);
+
+    if (!validation.valid) {
+      setError(
+        validation.reason
+      );
+
+      return;
+    }
+
+    try {
+      setActionLoading(
+        `edit-${comment.id}`
+      );
+
+      const updated =
+        await updateBackendComment(
+          comment.id,
+          text,
+          comment.language
+        );
+
+      const mapped =
+        mapBackendCommentToFrontend(
+          updated
+        );
+
+      setComments(
+        (previous) =>
+          previous.map(
+            (item) =>
+              item.id ===
+              comment.id
+                ? mapped
+                : item
+          )
+      );
+
+      cancelEditing();
+
+      setSuccess(
+        "Comment updated successfully."
+      );
+    } catch (error) {
+      console.error(
+        "Update comment error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to update comment."
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /*
+   * ============================
+   * DELETE
+   * ============================
+   */
+
+  const handleDelete = async (
+    comment: VideoComment
+  ) => {
+    if (!isOwnComment(comment)) {
+      setError(
+        "You can only delete your own comment."
+      );
+
+      return;
+    }
+
+    const confirmed =
+      window.confirm(
+        "Are you sure you want to delete this comment?"
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      setActionLoading(
+        `delete-${comment.id}`
+      );
+
+      await deleteBackendComment(
+        comment.id
+      );
+
+      setComments(
+        (previous) =>
+          previous.filter(
+            (item) =>
+              item.id !==
+              comment.id
+          )
+      );
+
+      if (
+        editingId ===
+        comment.id
+      ) {
+        cancelEditing();
+      }
+
+      if (
+        replyingTo ===
+        comment.id
+      ) {
+        setReplyingTo(null);
+        setReplyText("");
+      }
+
+      setSuccess(
+        "Comment deleted successfully."
+      );
+    } catch (error) {
+      console.error(
+        "Delete comment error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to delete comment."
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /*
+   * ============================
+   * LIKE
+   * ============================
+   */
+
+  const handleLike = async (
+    commentId: string
+  ) => {
+    if (!requireLogin()) {
+      return;
+    }
+
+    try {
+      setActionLoading(
+        `like-${commentId}`
+      );
+
+      const updated =
+        await reactToBackendComment(
+          commentId,
+          "like"
+        );
+
+      const mapped =
+        mapBackendCommentToFrontend(
+          updated
+        );
+
+      setComments(
+        (previous) =>
+          previous.map(
+            (comment) =>
+              comment.id ===
+              commentId
+                ? mapped
+                : comment
+          )
+      );
+    } catch (error) {
+      console.error(
+        "Like comment error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to update reaction."
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /*
+   * ============================
+   * DISLIKE
+   * ============================
+   */
+
+  const handleDislike = async (
+    commentId: string
+  ) => {
+    if (!requireLogin()) {
+      return;
+    }
+
+    try {
+      setActionLoading(
+        `dislike-${commentId}`
+      );
+
+      const updated =
+        await reactToBackendComment(
+          commentId,
+          "dislike"
+        );
+
+      const mapped =
+        mapBackendCommentToFrontend(
+          updated
+        );
+
+      setComments(
+        (previous) =>
+          previous.map(
+            (comment) =>
+              comment.id ===
+              commentId
+                ? mapped
+                : comment
+          )
+      );
+    } catch (error) {
+      console.error(
+        "Dislike comment error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to update reaction."
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /*
+   * ============================
+   * REPORT
+   * ============================
+   */
+
+  const handleReport = async (
+    comment: VideoComment,
+    reason: CommentReportReason
+  ) => {
+    if (!requireLogin()) {
+      return;
+    }
+
+    try {
+      setActionLoading(
+        `report-${comment.id}`
+      );
+
+      await reportBackendComment(
+        comment.id,
+        reason
+      );
+
+      setReportingId(null);
+
+      setComments(
+        (previous) =>
+          previous.map(
+            (item) =>
+              item.id ===
+              comment.id
+                ? {
+                    ...item,
+                    reported: true,
+                    reportReasons:
+                      Array.from(
+                        new Set([
+                          ...(item.reportReasons ||
+                            []),
+                          reason,
+                        ])
+                      ),
+                  }
+                : item
+          )
+      );
+
+      setSuccess(
+        "Comment reported for review."
+      );
+    } catch (error) {
+      console.error(
+        "Report comment error:",
+        error
+      );
+
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Unable to report this comment."
+      );
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /*
+   * ============================
+   * TRANSLATION
+   * ============================
+   */
+
+  const handleTranslate = async (
+    comment: VideoComment
+  ) => {
+    clearMessages();
+
+    if (
+      comment.language ===
+      targetLanguage
+    ) {
+      setTranslatedComments(
+        (previous) => ({
+          ...previous,
+          [comment.id]:
+            comment.text,
+        })
+      );
+
+      return;
+    }
+
+    try {
+      setTranslatingId(
+        comment.id
+      );
+
+      const response =
+        await fetch(
+          "/api/translate",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              text:
+                comment.text,
+              sourceLanguage:
+                comment.language ||
+                "English",
+              targetLanguage,
+            }),
+          }
+        );
+
+      const data =
+        await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data?.error ||
+            "Translation failed."
+        );
+      }
+
+      if (
+        typeof data?.translatedText !==
+        "string"
+      ) {
+        throw new Error(
+          "Invalid translation response."
+        );
+      }
+
+      setTranslatedComments(
+        (previous) => ({
+          ...previous,
+          [comment.id]:
+            data.translatedText,
+        })
+      );
+
+      setSuccess(
+        `Comment translated to ${targetLanguage}.`
+      );
+    } catch (error) {
+      console.error(
+        "Translation error:",
+        error
+      );
+
+      setError(
+        "Unable to translate this comment right now."
+      );
+    } finally {
+      setTranslatingId(
+        null
+      );
+    }
+  };
+
+  const clearTranslation = (
+    commentId: string
+  ) => {
+    setTranslatedComments(
+      (previous) => {
+        const next = {
+          ...previous,
+        };
+
+        delete next[
+          commentId
+        ];
+
+        return next;
+      }
+    );
+  };
+
+  /*
+   * ============================
+   * UI HELPERS
+   * ============================
+   */
+
+  const formatDate = (
+    date: string
+  ) => {
+    return new Date(
+      date
+    ).toLocaleString(
+      undefined,
+      {
+        dateStyle:
+          "medium",
+        timeStyle:
+          "short",
+      }
+    );
+  };
+
+  const getInitials = (
+    name: string
+  ) => {
+    const initials =
+      name
+        .split(" ")
+        .filter(Boolean)
+        .map(
+          (word) =>
+            word[0]
+        )
+        .join("")
+        .slice(0, 2)
+        .toUpperCase();
+
+    return (
+      initials || "U"
+    );
+  };
+
+  const renderTextWithMentions = (
+    text: string
+  ) => {
+    const parts =
+      text.split(
+        /(@[a-zA-Z0-9_]+)/g
+      );
+
+    return parts.map(
+      (part, index) => {
+        if (
+          /^@[a-zA-Z0-9_]+$/.test(
+            part
+          )
+        ) {
+          return (
+            <span
+              key={`${part}-${index}`}
+              className="font-medium text-blue-600"
+            >
+              {part}
+            </span>
+          );
+        }
+
+        return (
+          <span
+            key={`${part}-${index}`}
+          >
+            {part}
+          </span>
+        );
+      }
+    );
+  };
+
+  const getDisplayText = (
+    comment: VideoComment
+  ) => {
+    return (
+      translatedComments[
+        comment.id
+      ] || comment.text
+    );
+  };
+
+  /*
+   * ============================
+   * RENDER COMMENT
+   * ============================
+   */
+
+  const renderComment = (
+    comment: VideoComment,
+    isReply = false
+  ) => {
+    const replies =
+      getReplies(
+        comment.id
+      );
+
+    const ownComment =
+      isOwnComment(comment);
+
+    const currentAction =
+      actionLoading;
+
+    return (
+      <article
+        key={comment.id}
+        className={`flex gap-3 ${
+          isReply
+            ? "ml-6 mt-5 sm:ml-12"
+            : ""
+        }`}
+      >
+        {/* Avatar */}
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-gray-200 text-xs font-semibold">
+          {comment.user.avatar ? (
+            <img
+              src={
+                comment.user.avatar
+              }
+              alt={
+                comment.user.displayName
+              }
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            getInitials(
+              comment.user.displayName
+            )
+          )}
+        </div>
+
+        {/* Body */}
+        <div className="min-w-0 flex-1">
+          {/* User Information */}
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm font-semibold">
+              {comment.user.displayName}
+            </p>
+
+            <span className="text-xs text-gray-500">
+              @{comment.user.username}
+            </span>
+
+            <span className="text-xs text-gray-400">
+              {formatDate(
+                comment.createdAt
+              )}
+            </span>
+
+            {comment.edited && (
+              <span className="text-xs text-gray-400">
+                (edited)
+              </span>
+            )}
+          </div>
+
+          {/* Location + Language */}
+          <p className="mt-1 text-xs text-gray-400">
+            {comment.user.location} •{" "}
+            {comment.language}
+          </p>
+
+          {/* Comment */}
+          {editingId ===
+          comment.id ? (
+            <div className="mt-3">
+              <textarea
+                value={editText}
+                onChange={(e) =>
+                  setEditText(
+                    e.target.value
+                  )
+                }
+                rows={3}
+                maxLength={1000}
+                className="w-full resize-none rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm outline-none focus:border-black"
+              />
+
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleEdit(
+                      comment
+                    )
+                  }
+                  disabled={
+                    currentAction ===
+                    `edit-${comment.id}`
+                  }
+                  className="rounded-full bg-black px-4 py-2 text-xs font-semibold text-white hover:bg-gray-800 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {currentAction ===
+                  `edit-${comment.id}`
+                    ? "Saving..."
+                    : "Save"}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={
+                    cancelEditing
+                  }
+                  className="rounded-full bg-gray-100 px-4 py-2 text-xs font-semibold hover:bg-gray-200"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-gray-700">
+                {renderTextWithMentions(
+                  getDisplayText(
+                    comment
+                  )
+                )}
+              </p>
+
+              {translatedComments[
+                comment.id
+              ] && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    clearTranslation(
+                      comment.id
+                    )
+                  }
+                  className="mt-1 text-xs font-medium text-blue-600 hover:underline"
+                >
+                  Show original
+                </button>
+              )}
+            </>
+          )}
+
+          {/* Actions */}
+          {editingId !==
+            comment.id && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {/* Like */}
+              <button
+                type="button"
+                onClick={() =>
+                  handleLike(
+                    comment.id
+                  )
+                }
+                disabled={
+                  currentAction ===
+                  `like-${comment.id}`
+                }
+                className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-xs transition ${
+                  comment.likedByCurrentUser
+                    ? "bg-black text-white"
+                    : "bg-gray-100 hover:bg-gray-200"
+                }`}
+              >
+                {currentAction ===
+                `like-${comment.id}` ? (
+                  <Loader2
+                    size={15}
+                    className="animate-spin"
+                  />
+                ) : (
+                  <ThumbsUp
+                    size={15}
+                  />
+                )}
+
+                {comment.likes}
+              </button>
+
+              {/* Dislike */}
+              <button
+                type="button"
+                onClick={() =>
+                  handleDislike(
+                    comment.id
+                  )
+                }
+                disabled={
+                  currentAction ===
+                  `dislike-${comment.id}`
+                }
+                className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-xs transition ${
+                  comment.dislikedByCurrentUser
+                    ? "bg-black text-white"
+                    : "bg-gray-100 hover:bg-gray-200"
+                }`}
+              >
+                {currentAction ===
+                `dislike-${comment.id}` ? (
+                  <Loader2
+                    size={15}
+                    className="animate-spin"
+                  />
+                ) : (
+                  <ThumbsDown
+                    size={15}
+                  />
+                )}
+
+                {comment.dislikes}
+              </button>
+
+              {/* Reply */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (
+                    !requireLogin()
+                  ) {
+                    return;
+                  }
+
+                  setReplyingTo(
+                    comment.id
+                  );
+
+                  setReplyText(
+                    `@${comment.user.username} `
+                  );
+
+                  setEditingId(
+                    null
+                  );
+
+                  clearMessages();
+                }}
+                className="flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1.5 text-xs hover:bg-gray-200"
+              >
+                <CornerUpLeft
+                  size={15}
+                />
+
+                Reply
+
+                {comment.replyCount >
+                  0 && (
+                  <span>
+                    ({comment.replyCount})
+                  </span>
+                )}
+              </button>
+
+              {/* Translate */}
+              <div className="flex flex-wrap items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleTranslate(
+                      comment
+                    )
+                  }
+                  disabled={
+                    translatingId ===
+                    comment.id
+                  }
+                  className="flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1.5 text-xs transition hover:bg-gray-200 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {translatingId ===
+                  comment.id ? (
+                    <Loader2
+                      size={14}
+                      className="animate-spin"
+                    />
+                  ) : (
+                    <Languages
+                      size={14}
+                    />
+                  )}
+
+                  Translate
+                </button>
+
+                <select
+                  value={
+                    targetLanguage
+                  }
+                  onChange={(e) =>
+                    setTargetLanguage(
+                      e.target.value
+                    )
+                  }
+                  className="rounded-full border border-gray-200 bg-white px-2 py-1.5 text-[11px] outline-none focus:border-black"
+                >
+                  {languages.map(
+                    (language) => (
+                      <option
+                        key={
+                          language
+                        }
+                        value={
+                          language
+                        }
+                      >
+                        {language}
+                      </option>
+                    )
+                  )}
+                </select>
+              </div>
+
+              {/* Report */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      !requireLogin()
+                    ) {
+                      return;
+                    }
+
+                    setReportingId(
+                      reportingId ===
+                        comment.id
+                        ? null
+                        : comment.id
+                    );
+                  }}
+                  className="flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1.5 text-xs hover:bg-gray-200"
+                >
+                  <Flag
+                    size={14}
+                  />
+
+                  Report
+                </button>
+
+                {reportingId ===
+                  comment.id && (
+                  <div className="absolute left-0 top-9 z-40 w-52 overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-xl">
+                    {reportReasons.map(
+                      (reason) => (
+                        <button
+                          key={
+                            reason.value
+                          }
+                          type="button"
+                          onClick={() =>
+                            handleReport(
+                              comment,
+                              reason.value
+                            )
+                          }
+                          disabled={
+                            currentAction ===
+                            `report-${comment.id}`
+                          }
+                          className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-xs hover:bg-gray-100 disabled:opacity-60"
+                        >
+                          <Flag
+                            size={13}
+                          />
+
+                          {
+                            reason.label
+                          }
+                        </button>
+                      )
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Owner Controls */}
+              {ownComment && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      startEditing(
+                        comment
+                      )
+                    }
+                    className="flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1.5 text-xs hover:bg-gray-200"
+                  >
+                    <Pencil
+                      size={14}
+                    />
+
+                    Edit
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleDelete(
+                        comment
+                      )
+                    }
+                    disabled={
+                      currentAction ===
+                      `delete-${comment.id}`
+                    }
+                    className="flex items-center gap-1 rounded-full bg-gray-100 px-3 py-1.5 text-xs text-red-600 hover:bg-red-50 disabled:opacity-60"
+                  >
+                    {currentAction ===
+                    `delete-${comment.id}` ? (
+                      <Loader2
+                        size={14}
+                        className="animate-spin"
+                      />
+                    ) : (
+                      <Trash2
+                        size={14}
+                      />
+                    )}
+
+                    Delete
+                  </button>
+                </>
+              )}
+
+              ```tsx
+{/* More Options Dropdown */}
+<div className="relative">
+  <button
+    type="button"
+    aria-label="More options"
+    aria-expanded={openCommentMenuId === comment.id}
+    onClick={() => {
+      setOpenCommentMenuId(
+        openCommentMenuId === comment.id
+          ? null
+          : comment.id
+      );
+    }}
+    className="rounded-full bg-gray-100 p-2 hover:bg-gray-200"
+  >
+    <MoreHorizontal size={15} />
+  </button>
+
+  {openCommentMenuId === comment.id && (
+    <div className="absolute right-0 top-10 z-50 w-48 overflow-hidden rounded-xl border border-gray-200 bg-white py-1 shadow-xl">
+      <button
+        type="button"
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(
+              getDisplayText(comment)
+            );
+            setSuccess("Comment copied successfully.");
+          } catch {
+            setError("Unable to copy this comment.");
+          }
+          setOpenCommentMenuId(null);
+        }}
+        className="w-full px-4 py-2.5 text-left text-sm hover:bg-gray-100"
+      >
+        Copy comment
+      </button>
+
+      <button
+        type="button"
+        onClick={() => {
+          setOpenCommentMenuId(null);
+
+          if (!requireLogin()) return;
+
+          setReportingId(comment.id);
+        }}
+        className="w-full px-4 py-2.5 text-left text-sm hover:bg-gray-100"
+      >
+        Report comment
+      </button>
+
+      {ownComment && (
+        <>
+          <button
+            type="button"
+            onClick={() => {
+              setOpenCommentMenuId(null);
+              startEditing(comment);
+            }}
+            className="w-full px-4 py-2.5 text-left text-sm hover:bg-gray-100"
+          >
+            Edit comment
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setOpenCommentMenuId(null);
+              void handleDelete(comment);
+            }}
+            disabled={
+              currentAction === `delete-${comment.id}`
+            }
+            className="w-full px-4 py-2.5 text-left text-sm text-red-600 hover:bg-red-50 disabled:opacity-60"
+          >
+            Delete comment
+          </button>
+        </>
+      )}
+    </div>
+  )}
+</div>
+```
+            </div>
+          )}
+
+          {/* Reply Box */}
+          {replyingTo ===
+            comment.id && (
+            <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-3">
+              <div className="flex gap-3">
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[10px] font-semibold">
+                  {currentUser
+                    ? getInitials(
+                        currentUser.name
+                      )
+                    : "U"}
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={replyText}
+                    onChange={(e) =>
+                      setReplyText(
+                        e.target.value
+                      )
+                    }
+                    onKeyDown={(
+                      e
+                    ) => {
+                      if (
+                        e.key ===
+                        "Enter"
+                      ) {
+                        void handleReply(
+                          comment
+                        );
+                      }
+                    }}
+                    maxLength={1000}
+                    placeholder="Write a reply..."
+                    className="w-full border-b border-gray-300 bg-transparent pb-2 text-sm outline-none focus:border-black"
+                  />
+
+                  <div className="mt-3 flex flex-wrap justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReplyingTo(
+                          null
+                        );
+
+                        setReplyText(
+                          ""
+                        );
+                      }}
+                      className="flex items-center gap-1 rounded-full bg-white px-3 py-2 text-xs font-medium hover:bg-gray-200"
+                    >
+                      <X
+                        size={14}
+                      />
+
+                      Cancel
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleReply(
+                          comment
+                        )
+                      }
+                      disabled={
+                        !replyText.trim() ||
+                        currentAction ===
+                          `reply-${comment.id}`
+                      }
+                      className="flex items-center gap-1 rounded-full bg-black px-4 py-2 text-xs font-medium text-white hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+                    >
+                      {currentAction ===
+                      `reply-${comment.id}` ? (
+                        <Loader2
+                          size={14}
+                          className="animate-spin"
+                        />
+                      ) : (
+                        <Send
+                          size={14}
+                        />
+                      )}
+
+                      Reply
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Replies */}
+          {replies.length >
+            0 && (
+            <div className="mt-2">
+              {replies.map(
+                (reply) =>
+                  renderComment(
+                    reply,
+                    true
+                  )
+              )}
+            </div>
+          )}
+        </div>
+      </article>
+    );
+  };
+
+  /*
+   * ============================
+   * MAIN UI
+   * ============================
+   */
+
+  return (
+    <section className="mt-8">
+      {/* CAPTCHA */}
+      {captchaOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Check
+                  size={22}
+                />
+
+                <h3 className="text-lg font-bold">
+                  Quick verification
+                </h3>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setCaptchaOpen(
+                    false
+                  );
+
+                  setCaptchaAnswer(
+                    ""
+                  );
+                }}
+                aria-label="Close CAPTCHA"
+                className="rounded-full p-2 hover:bg-gray-100"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <p className="mt-2 text-sm text-gray-500">
+              Please solve this simple verification before
+              posting.
+            </p>
+
+            <div className="mt-5 rounded-xl bg-gray-50 p-5 text-center">
+              <p className="text-2xl font-bold">
+                {captcha.first} +{" "}
+                {captcha.second}
+              </p>
+
+              <input
+                autoFocus
+                type="number"
+                value={captchaAnswer}
+                onChange={(e) =>
+                  setCaptchaAnswer(
+                    e.target.value
+                  )
+                }
+                onKeyDown={(e) => {
+                  if (
+                    e.key ===
+                    "Enter"
+                  ) {
+                    void handleCaptchaSubmit();
+                  }
+                }}
+                placeholder="Answer"
+                className="mt-4 w-full rounded-xl border border-gray-300 px-4 py-3 text-center outline-none focus:border-black"
+              />
+            </div>
+
+            <p className="mt-3 text-xs text-gray-400">
+              Verification required for{" "}
+              {captchaFor}.
+            </p>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setCaptchaOpen(
+                    false
+                  );
+
+                  setCaptchaAnswer(
+                    ""
+                  );
+                }}
+                className="rounded-full bg-gray-100 px-4 py-2 text-sm font-medium hover:bg-gray-200"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  void handleCaptchaSubmit()
+                }
+                className="rounded-full bg-black px-5 py-2 text-sm font-semibold text-white hover:bg-gray-800"
+              >
+                Verify & Post
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <MessageCircle
+            size={22}
+          />
+
+          <h2 className="text-xl font-bold">
+            {comments.length}{" "}
+            {comments.length === 1
+              ? "Comment"
+              : "Comments"}
+          </h2>
+        </div>
+
+        {/* Sort */}
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-500">
+            Sort by
+          </span>
+
+          <select
+            value={sortOption}
+            onChange={(e) =>
+              setSortOption(
+                e.target
+                  .value as SortOption
+              )
+            }
+            className="rounded-full border border-gray-300 bg-white px-3 py-2 text-xs font-medium outline-none focus:border-black"
+          >
+            <option value="newest">
+              Newest
+            </option>
+
+            <option value="oldest">
+              Oldest
+            </option>
+
+            <option value="liked">
+              Most liked
+            </option>
+
+            <option value="relevant">
+              Most relevant
+            </option>
+          </select>
+        </div>
+      </div>
+
+      {/* Error */}
+      {error && (
+        <div className="mt-4 flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          <p>{error}</p>
+
+          <button
+            type="button"
+            onClick={() =>
+              setError("")
+            }
+            className="shrink-0"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* Success */}
+      {success && (
+        <div className="mt-4 flex items-start justify-between gap-3 rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700">
+          <p>{success}</p>
+
+          <button
+            type="button"
+            onClick={() =>
+              setSuccess("")
+            }
+            className="shrink-0"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
+
+      {/* Add Comment */}
+      <div className="mt-5">
+        <div className="flex gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-gray-200 text-xs font-semibold">
+            {currentUser
+              ? getInitials(
+                  currentUser.name
+                )
+              : "U"}
+          </div>
+
+          <div className="min-w-0 flex-1">
+            <textarea
+              value={commentText}
+              onChange={(e) => {
+                setCommentText(
+                  e.target.value
+                );
+
+                if (error) {
+                  setError("");
+                }
+
+                if (success) {
+                  setSuccess("");
+                }
+              }}
+              rows={3}
+              maxLength={1000}
+              placeholder={
+                currentUser
+                  ? "Add a comment..."
+                  : "Sign in to add a comment..."
+              }
+              className="w-full resize-none rounded-xl border border-gray-300 bg-white px-4 py-3 text-sm outline-none focus:border-black"
+            />
+
+            <div className="mt-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2">
+                <select
+                  value={
+                    commentLanguage
+                  }
+                  onChange={(e) =>
+                    setCommentLanguage(
+                      e.target.value
+                    )
+                  }
+                  className="w-fit rounded-full border border-gray-300 bg-white px-3 py-2 text-xs outline-none focus:border-black"
+                >
+                  {languages.map(
+                    (language) => (
+                      <option
+                        key={
+                          language
+                        }
+                        value={
+                          language
+                        }
+                      >
+                        {language}
+                      </option>
+                    )
+                  )}
+                </select>
+
+                <span className="text-xs text-gray-400">
+                  {commentText.length}/1000
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  void handleAddComment()
+                }
+                disabled={
+                  !commentText.trim() ||
+                  actionLoading ===
+                    "new-comment"
+                }
+                className="flex items-center justify-center gap-2 rounded-full bg-black px-5 py-2.5 text-sm font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:bg-gray-300"
+              >
+                {actionLoading ===
+                "new-comment" ? (
+                  <Loader2
+                    size={16}
+                    className="animate-spin"
+                  />
+                ) : (
+                  <Send
+                    size={16}
+                  />
+                )}
+
+                {actionLoading ===
+                "new-comment"
+                  ? "Posting..."
+                  : "Post comment"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Comments */}
+      <div className="mt-8 space-y-7">
+        {loading ? (
+          <div className="py-10 text-center">
+            <Loader2
+              size={32}
+              className="mx-auto animate-spin text-gray-400"
+            />
+
+            <p className="mt-3 text-sm text-gray-500">
+              Loading comments...
+            </p>
+          </div>
+        ) : rootComments.length >
+          0 ? (
+          rootComments.map(
+            (comment) =>
+              renderComment(
+                comment
+              )
+          )
+        ) : (
+          <div className="py-10 text-center">
+            <MessageCircle
+              size={42}
+              className="mx-auto text-gray-300"
+            />
+
+            <p className="mt-3 text-sm font-medium text-gray-500">
+              No comments yet.
+            </p>
+
+            <p className="mt-1 text-xs text-gray-400">
+              Be the first to comment.
+            </p>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
