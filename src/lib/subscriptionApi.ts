@@ -1,7 +1,7 @@
 
 import { getBackendToken } from "@/lib/backendAuth";
 
-const API_URL = "http://localhost:5000/api/subscriptions";
+const API_URL = "https://youtube-clone-project-2026.onrender.com/api/subscriptions";
 
 export type SubscriptionStatusResponse = {
   success: boolean;

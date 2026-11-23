@@ -33,7 +33,7 @@ import {
   getBackendToken,
 } from "@/lib/backendAuth";
 
-const BACKEND_API_URL = "http://localhost:5000/api/videos";
+const BACKEND_API_URL = "https://youtube-clone-project-2026.onrender.com/api/videos";
 
 type BackendVideo = {
   _id: string;

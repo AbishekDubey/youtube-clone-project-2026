@@ -110,7 +110,7 @@ declare global {
   }
 }
 
-const API_URL = "http://localhost:5000/api/payments";
+const API_URL = "https://youtube-clone-project-2026.onrender.com/api/payments";
 
 export default function MembershipPage() {
   const router = useRouter();

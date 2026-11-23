@@ -23,7 +23,7 @@ import { getCurrentUser } from "@/lib/auth";
 
 const BACKEND_API_URL =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") ||
-  "http://localhost:5000";
+  "https://youtube-clone-project-2026.onrender.com"
 
 const VIDEOS_API_URL = `${BACKEND_API_URL}/api/videos`;
 

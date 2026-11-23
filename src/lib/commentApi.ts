@@ -53,7 +53,7 @@ type BackendReportResponse = {
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL
     ? `${process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "")}/api/comments`
-    : "http://localhost:5000/api/comments";
+    : "https://youtube-clone-project-2026.onrender.com/api/comments"
 
 async function request<T>(
   url: string,

@@ -13,7 +13,7 @@ export type AuthResponse = {
   user?: BackendUser;
 };
 
-const API_URL = "http://localhost:5000/api/auth";
+const API_URL = "https://youtube-clone-project-2026.onrender.com/api/auth";
 
 // Normalize user data from backend.
 // MongoDB may return _id instead of id.

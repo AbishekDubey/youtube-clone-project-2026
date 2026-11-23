@@ -4,7 +4,7 @@ import type {
 } from "next";
 
 const BACKEND_URL =
-  "http://localhost:5000/api/videos";
+  "https://youtube-clone-project-2026.onrender.com/api/videos"
 
 export default async function handler(
   req: NextApiRequest,
