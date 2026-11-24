@@ -17,7 +17,10 @@ const app = express();
 // 1. CORS middleware FIRST
 app.use(
   cors({
-    origin: "http://localhost:3000",
+    origin: [
+      "http://localhost:3000",
+      "https://youtube-clone-project-2026.vercel.app",
+    ],
     credentials: true,
   })
 );
